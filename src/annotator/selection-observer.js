@@ -1,5 +1,40 @@
 import { ListenerCollection } from '../shared/listener-collection';
 
+function snapSelectionToWord() {
+  // Adapted from https://stackoverflow.com/questions/10964016/how-do-i-extend-selection-to-word-boundary-using-javascript-once-only#comment14316703_10964743
+  let sel = window.getSelection();
+  if (sel && !sel.isCollapsed && sel.anchorNode && sel.focusNode) {
+    // Detect if selection is backwards
+    let range = document.createRange();
+    range.setStart(sel.anchorNode, sel.anchorOffset);
+    range.setEnd(sel.focusNode, sel.focusOffset);
+    let backwards = range.collapsed;
+    range.detach();
+
+    // modify() works on the focus of the selection
+    let endNode = sel.focusNode,
+      endOffset = sel.focusOffset;
+    sel.collapse(sel.anchorNode, sel.anchorOffset);
+
+    let direction = [];
+    if (backwards) {
+      direction = ['backward', 'forward'];
+    } else {
+      direction = ['forward', 'backward'];
+    }
+
+    // @ts-ignore
+    sel.modify('move', direction[0], 'character');
+    // @ts-ignore
+    sel.modify('move', direction[1], 'word');
+    sel.extend(endNode, endOffset);
+    // @ts-ignore
+    sel.modify('extend', direction[1], 'character');
+    // @ts-ignore
+    sel.modify('extend', direction[0], 'word');
+  }
+}
+
 /**
  * Return the current selection or `null` if there is no selection or it is empty.
  *
@@ -7,6 +42,7 @@ import { ListenerCollection } from '../shared/listener-collection';
  * @return {Range|null}
  */
 export function selectedRange(document) {
+  snapSelectionToWord()
   const selection = document.getSelection();
   if (!selection || selection.rangeCount === 0) {
     return null;
