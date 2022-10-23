@@ -694,7 +694,7 @@ export async function describe(root, range) {
  */
 export async function provideContext(root, range) {
   const [textRange] = getTextLayerForRange(range);
-  return provideContextHtml(root, textRange)
+  return provideContextHtml(root, textRange);
 }
 
 /**

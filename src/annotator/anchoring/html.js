@@ -132,17 +132,13 @@ function cleanUpString(str) {
  */
 export async function provideContext(root, range) {
   const textQuoteAnchor = TextQuoteAnchor.fromRange(root, range);
-  const treeWalker = document.createTreeWalker(
-    root,
-    NodeFilter.SHOW_TEXT,
-    {
-      acceptNode(node) {
-        return node.textContent && /^\n*$/.test(node.textContent.trim())
-          ? NodeFilter.FILTER_REJECT
-          : NodeFilter.FILTER_ACCEPT;
-      },
-    }
-  );
+  const treeWalker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      return node.textContent && /^\n*$/.test(node.textContent.trim())
+        ? NodeFilter.FILTER_REJECT
+        : NodeFilter.FILTER_ACCEPT;
+    },
+  });
 
   const rootTextContentInNodes = [];
   let currentNode;
@@ -154,18 +150,16 @@ export async function provideContext(root, range) {
     }
   }
 
-  const rootTextContentInString = cleanUpString(rootTextContentInNodes.join(' '));
+  const rootTextContentInString = cleanUpString(
+    rootTextContentInNodes.join(' ')
+  );
   let match;
   const exact = cleanUpString(textQuoteAnchor.exact);
   if (textQuoteAnchor.context.prefix && textQuoteAnchor.context.suffix) {
-    match = matchQuote(
-      rootTextContentInString,
-      exact,
-      {
-        prefix: cleanUpString(textQuoteAnchor.context.prefix),
-        suffix: cleanUpString(textQuoteAnchor.context.suffix),
-      }
-    );
+    match = matchQuote(rootTextContentInString, exact, {
+      prefix: cleanUpString(textQuoteAnchor.context.prefix),
+      suffix: cleanUpString(textQuoteAnchor.context.suffix),
+    });
   }
 
   if (!match) {
@@ -173,24 +167,30 @@ export async function provideContext(root, range) {
       type: 'Context',
       prefix: '',
       quote: exact,
-      suffix: ''
+      suffix: '',
     };
   }
 
   // @ts-ignore
-  const segmenter = new Intl.Segmenter('en', {granularity: "sentence"});
+  const segmenter = new Intl.Segmenter('en', { granularity: 'sentence' });
   const contextLen = 500;
-  let prefix = rootTextContentInString.slice(Math.max(0, match.start - contextLen), match.start);
-  let suffix = rootTextContentInString.slice(match.end, Math.min(rootTextContentInString.length, match.end + contextLen))
+  let prefix = rootTextContentInString.slice(
+    Math.max(0, match.start - contextLen),
+    match.start
+  );
+  let suffix = rootTextContentInString.slice(
+    match.end,
+    Math.min(rootTextContentInString.length, match.end + contextLen)
+  );
 
   let segments = segmenter.segment(prefix);
-  for (let {segment} of segments) {
-    prefix = segment
+  for (let { segment } of segments) {
+    prefix = segment;
   }
 
   segments = segmenter.segment(suffix);
-  for (let {segment} of segments) {
-    suffix = segment
+  for (let { segment } of segments) {
+    suffix = segment;
     break;
   }
 
@@ -198,6 +198,6 @@ export async function provideContext(root, range) {
     type: 'Context',
     prefix: prefix.trimStart(),
     quote: exact,
-    suffix: suffix.trimEnd()
-  }
+    suffix: suffix.trimEnd(),
+  };
 }

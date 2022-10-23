@@ -42,7 +42,7 @@ function snapSelectionToWord() {
  * @return {Range|null}
  */
 export function selectedRange(document) {
-  snapSelectionToWord()
+  snapSelectionToWord();
   const selection = document.getSelection();
   if (!selection || selection.rangeCount === 0) {
     return null;
