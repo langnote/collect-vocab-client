@@ -218,20 +218,6 @@ export default function CustomFieldsEditor({
             <span>{type.name}</span>
           </label>
         ))}
-        <label
-          htmlFor="inlineRadio300"
-          className="inline-flex items-center mb-2 mr-2 opacity-50"
-        >
-          <input
-            className="appearance-none rounded-full h-4 w-4 border border-gray-300 bg-white checked:bg-blue-600 checked:border-blue-600 focus:outline-none transition duration-200 align-top bg-no-repeat bg-center bg-contain float-left mr-1"
-            type="radio"
-            name="inlineRadioOptions"
-            id="inlineRadio300"
-            value="option3"
-            disabled
-          />
-          <span>3 (disabled)</span>
-        </label>
       </div>
       {getVisibleFields(selectedSchema).map((field, index) => (
         <MarkdownEditor
