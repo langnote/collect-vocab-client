@@ -31,6 +31,7 @@ const initialState = {
  * @prop {boolean} isPrivate
  * @prop {string[]} tags
  * @prop {string} text
+ * @prop {object} custom_fields
  */
 
 /**
@@ -49,6 +50,7 @@ export class Draft {
     this.isPrivate = changes.isPrivate;
     this.tags = changes.tags;
     this.text = changes.text;
+    this.custom_fields = changes.custom_fields;
   }
   /**
    * Returns true if this draft matches a given annotation.
@@ -68,7 +70,7 @@ export class Draft {
    * any user input.
    */
   isEmpty() {
-    return !this.text && this.tags.length === 0;
+    return !this.text && !this.custom_fields && this.tags.length === 0;
   }
 }
 

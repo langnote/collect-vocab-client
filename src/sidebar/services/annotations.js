@@ -42,6 +42,7 @@ export class AnnotationsService {
     if (draft) {
       changes.tags = draft.tags;
       changes.text = draft.text;
+      changes.custom_fields = draft.custom_fields;
       changes.permissions = draft.isPrivate
         ? privatePermissions(annotation.user)
         : sharedPermissions(annotation.user, annotation.group);
@@ -87,6 +88,7 @@ export class AnnotationsService {
         permissions: defaultPermissions(userid, groupid, defaultPrivacy),
         tags: [],
         text: '',
+        custom_fields: {},
         updated: now.toISOString(),
         user: userid,
         user_info: userInfo,
@@ -126,6 +128,7 @@ export class AnnotationsService {
       this._store.createDraft(annotation, {
         tags: annotation.tags,
         text: annotation.text,
+        custom_fields: annotation.custom_fields,
         isPrivate: !metadata.isPublic(annotation),
       });
     }

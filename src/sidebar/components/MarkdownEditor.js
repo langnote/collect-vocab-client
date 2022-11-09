@@ -347,10 +347,10 @@ function Toolbar({ isPreviewing, onCommand, onTogglePreview }) {
  * @prop {Record<string,string>} [textStyle] -
  *   Additional CSS properties to apply to the input field and rendered preview
  * @prop {string} [text] - The markdown text to edit.
- * @prop {(text: string) => void} [onEditText]
- *   - Callback invoked with `{ text }` object when user edits text.
- *   TODO: Simplify this callback to take just a string rather than an object once the
- *   parent component is converted to Preact.
+ * @prop {(field_name: string, value: string) => void} [onEditText]
+ * @prop {string} fieldName - Field name
+ * @prop {string} placeHolder - Place holder
+ * @prop {boolean} focusOnInit - Focus on input after component did mount
  */
 
 /**
@@ -363,6 +363,9 @@ export default function MarkdownEditor({
   onEditText = () => {},
   text = '',
   textStyle = {},
+  fieldName = '',
+  placeHolder = '',
+  focusOnInit = false,
 }) {
   // Whether the preview mode is currently active.
   const [preview, setPreview] = useState(false);
@@ -370,8 +373,19 @@ export default function MarkdownEditor({
   // The input element where the user inputs their comment.
   const input = useRef(/** @type {HTMLTextAreaElement|null} */ (null));
 
+  const firstUpdate = useRef(true);
+
   useEffect(() => {
-    if (!preview) {
+    setTimeout(() => {
+      firstUpdate.current = false;
+      if (focusOnInit) {
+        input.current?.focus();
+      }
+    }, 0);
+  }, [focusOnInit]);
+
+  useEffect(() => {
+    if (!preview && !firstUpdate.current) {
       input.current?.focus();
     }
   }, [preview]);
@@ -382,7 +396,7 @@ export default function MarkdownEditor({
   const handleCommand = command => {
     if (input.current) {
       handleToolbarCommand(command, input.current);
-      onEditText(input.current.value);
+      onEditText(fieldName, input.current.value);
     }
   };
 
@@ -419,17 +433,21 @@ export default function MarkdownEditor({
           aria-label={label}
           dir="auto"
           classes={classnames(
-            'w-full min-h-[8em] resize-y',
+            'w-full min-h-[5em] resize-y',
             // Turn off border-radius on top edges to align with toolbar above
             'rounded-t-none',
             // Larger font on touch devices
             'text-base touch:text-touch-base'
           )}
+          placeholder={placeHolder}
           containerRef={input}
           onClick={e => e.stopPropagation()}
           onKeyDown={handleKeyDown}
           onInput={e =>
-            onEditText(/** @type {HTMLTextAreaElement} */ (e.target).value)
+            onEditText(
+              fieldName,
+              /** @type {HTMLTextAreaElement} */ (e.target).value
+            )
           }
           value={text}
           style={textStyle}

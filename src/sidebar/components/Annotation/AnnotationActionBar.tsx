@@ -100,6 +100,7 @@ function AnnotationActionBar({
     store.createDraft(annotation, {
       tags: annotation.tags,
       text: annotation.text,
+      custom_fields: annotation.custom_fields,
       isPrivate: isPrivate(annotation.permissions),
     });
   };

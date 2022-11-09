@@ -175,6 +175,7 @@ export type Annotation = ClientAnnotationData & {
   updated: string;
   tags: string[];
   text: string;
+  custom_fields: object;
   uri: string;
   user: string;
   hidden: boolean;

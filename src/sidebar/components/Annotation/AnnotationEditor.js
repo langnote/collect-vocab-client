@@ -9,7 +9,7 @@ import {
 import { applyTheme } from '../../helpers/theme';
 import { useSidebarStore } from '../../store';
 
-import MarkdownEditor from '../MarkdownEditor';
+import CustomFieldsEditor from '../CustomFieldsEditor';
 import TagEditor from '../TagEditor';
 
 import AnnotationLicense from './AnnotationLicense';
@@ -57,7 +57,8 @@ function AnnotationEditor({
 
   const tags = draft.tags;
   const text = draft.text;
-  const isEmpty = !text && !tags.length;
+  const customFields = draft.custom_fields;
+  const isEmpty = !text && !customFields && !tags.length;
 
   const onEditTags = useCallback(
     /** @param {string[]} tags */
@@ -109,10 +110,16 @@ function AnnotationEditor({
     [onEditTags, tags]
   );
 
-  const onEditText = useCallback(
-    /** @param {string} text */
-    text => {
-      store.createDraft(draft.annotation, { ...draft, text });
+  const onEditCustomFields = useCallback(
+    /**
+     * @param {string} field_name
+     * @param {string} value
+     */
+    (field_name, value) => {
+      store.createDraft(draft.annotation, {
+        ...draft,
+        custom_fields: { ...draft.custom_fields, [field_name]: value },
+      });
     },
     [draft, store]
   );
@@ -184,11 +191,11 @@ function AnnotationEditor({
       className="space-y-4"
       onKeyDown={onKeyDown}
     >
-      <MarkdownEditor
+      <CustomFieldsEditor
+        annotationId={draft.annotation.id ?? draft.annotation.$tag}
         textStyle={textStyle}
-        label="Annotation body"
-        text={text}
-        onEditText={onEditText}
+        customFields={customFields}
+        onEditCustomFields={onEditCustomFields}
       />
       <TagEditor
         onAddTag={onAddTag}

@@ -245,6 +245,7 @@ export function isHighlight(annotation) {
     !isReply(annotation) &&
     !annotation.hidden && // A hidden annotation has some form of objectionable content
     !annotation.text &&
+    !annotation.custom_fields &&
     !(annotation.tags && annotation.tags.length)
   );
 }
