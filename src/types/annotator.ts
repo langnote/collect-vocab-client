@@ -175,7 +175,7 @@ export type IntegrationBase = {
   describe(root: HTMLElement, range: Range): Selector[] | Promise<Selector[]>;
 
   /** Find the sentence from which the content is quoted. */
-  provideContext(root: HTMLElement, range: Range): Context | Promise<Context[]>;
+  provideContext(root: HTMLElement, range: Range): Promise<Context>;
 
   /**
    * Return the main element that contains the document content. This is used
