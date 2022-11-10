@@ -39,6 +39,8 @@ describe('Guest', () => {
 
   let FakeBucketBarClient;
   let fakeBucketBarClient;
+  let fakeHighlightClusterController;
+  let FakeHighlightClusterController;
   let fakeCreateIntegration;
   let fakeFindClosestOffscreenAnchor;
   let fakeFrameFillsAncestor;
@@ -124,6 +126,13 @@ describe('Guest', () => {
     };
     FakeBucketBarClient = sinon.stub().returns(fakeBucketBarClient);
 
+    fakeHighlightClusterController = {
+      destroy: sinon.stub(),
+    };
+    FakeHighlightClusterController = sinon
+      .stub()
+      .returns(fakeHighlightClusterController);
+
     fakeFindClosestOffscreenAnchor = sinon.stub();
 
     fakeFrameFillsAncestor = sinon.stub().returns(true);
@@ -131,6 +140,7 @@ describe('Guest', () => {
     fakeIntegration = Object.assign(new TinyEmitter(), {
       anchor: sinon.stub(),
       canAnnotate: sinon.stub().returns(true),
+      canStyleClusteredHighlights: sinon.stub().returns(false),
       contentContainer: sinon.stub().returns({}),
       describe: sinon.stub(),
       provideContext: sinon.stub(),
@@ -140,6 +150,7 @@ describe('Guest', () => {
         title: 'Test title',
         documentFingerprint: 'test-fingerprint',
       }),
+      navigateToSegment: sinon.stub(),
       scrollToAnchor: sinon.stub().resolves(),
       showContentInfo: sinon.stub(),
       uri: sinon.stub().resolves('https://example.com/test.pdf'),
@@ -172,6 +183,9 @@ describe('Guest', () => {
       },
       './bucket-bar-client': {
         BucketBarClient: FakeBucketBarClient,
+      },
+      './highlight-clusters': {
+        HighlightClusterController: FakeHighlightClusterController,
       },
       './highlighter': highlighter,
       './integrations': {
@@ -411,6 +425,15 @@ describe('Guest', () => {
 
         assert.notCalled(eventEmitted);
         assert.notCalled(fakeIntegration.scrollToAnchor);
+      });
+    });
+
+    describe('on "navigateToSegment" event', () => {
+      it('requests integration to navigate to segment associated with annotation', () => {
+        createGuest();
+        const annotation = {};
+        emitSidebarEvent('navigateToSegment', annotation);
+        assert.calledWith(fakeIntegration.navigateToSegment, annotation);
       });
     });
 
@@ -972,6 +995,18 @@ describe('Guest', () => {
       assert.equal(annotation.$highlight, true);
     });
 
+    it('sets `$cluster` to `user-highlights` if `highlight` is true', async () => {
+      const guest = createGuest();
+      const annotation = await guest.createAnnotation({ highlight: true });
+      assert.equal(annotation.$cluster, 'user-highlights');
+    });
+
+    it('sets `$cluster` to `user-annotations` if `highlight` is false', async () => {
+      const guest = createGuest();
+      const annotation = await guest.createAnnotation({ highlight: false });
+      assert.equal(annotation.$cluster, 'user-annotations');
+    });
+
     it('triggers a "createAnnotation" event', async () => {
       const guest = createGuest();
 
@@ -1136,6 +1171,22 @@ describe('Guest', () => {
         'syncAnchoringStatus',
         annotation,
       ]);
+    });
+
+    it('provides CSS classes for anchor highlight elements', async () => {
+      const guest = createGuest();
+      const annotation = {
+        $cluster: 'user-annotations',
+        target: [{ selector: [{ type: 'TextQuoteSelector', exact: 'hello' }] }],
+      };
+      fakeIntegration.anchor.resolves(range);
+
+      await guest.anchor(annotation);
+
+      assert.equal(
+        highlighter.highlightRange.lastCall.args[1],
+        'user-annotations'
+      );
     });
 
     it('returns a promise of the anchors for the annotation', () => {
@@ -1315,6 +1366,14 @@ describe('Guest', () => {
       guest.destroy();
       assert.called(sidebarRPC().destroy);
     });
+
+    it('removes the clustered highlights toolbar', () => {
+      fakeIntegration.canStyleClusteredHighlights.returns(true);
+
+      const guest = createGuest();
+      guest.destroy();
+      assert.called(fakeHighlightClusterController.destroy);
+    });
   });
 
   it('discovers and creates a channel for communication with the sidebar', async () => {
@@ -1358,6 +1417,22 @@ describe('Guest', () => {
     });
   });
 
+  it('does not create a HighlightClusterController if the integration does not support clustered highlights', () => {
+    fakeIntegration.canStyleClusteredHighlights.returns(false);
+
+    createGuest();
+
+    assert.notCalled(FakeHighlightClusterController);
+  });
+
+  it('creates a HighlightClustersController if the integration supports clustered highlights', () => {
+    fakeIntegration.canStyleClusteredHighlights.returns(true);
+
+    createGuest();
+
+    assert.calledOnce(FakeHighlightClusterController);
+  });
+
   it('sends document metadata and URIs to sidebar', async () => {
     createGuest();
     await delay(0);
@@ -1367,7 +1442,45 @@ describe('Guest', () => {
         title: 'Test title',
         documentFingerprint: 'test-fingerprint',
       },
-      frameIdentifier: null,
+      segmentInfo: undefined,
+    });
+  });
+
+  it('waits for feature flags before sending metadata if requested by integration', async () => {
+    fakeIntegration.waitForFeatureFlags = () => true;
+    createGuest();
+
+    await delay(0);
+    assert.isFalse(sidebarRPC().call.calledWith('documentInfoChanged'));
+
+    emitSidebarEvent('featureFlagsUpdated', {
+      book_as_single_document: true,
+    });
+
+    await delay(0);
+    assert.isTrue(sidebarRPC().call.calledWith('documentInfoChanged'));
+  });
+
+  it('sends segment info to sidebar when available', async () => {
+    fakeIntegration.uri.resolves('https://bookstore.com/books/1234');
+    fakeIntegration.getMetadata.resolves({ title: 'A little book' });
+    fakeIntegration.segmentInfo = sinon.stub().resolves({
+      cfi: '/2',
+      url: '/chapters/02.xhtml',
+    });
+
+    createGuest();
+    await delay(0);
+
+    assert.calledWith(sidebarRPC().call, 'documentInfoChanged', {
+      uri: 'https://bookstore.com/books/1234',
+      metadata: {
+        title: 'A little book',
+      },
+      segmentInfo: {
+        cfi: '/2',
+        url: '/chapters/02.xhtml',
+      },
     });
   });
 
@@ -1384,7 +1497,7 @@ describe('Guest', () => {
       metadata: {
         title: 'Page 1',
       },
-      frameIdentifier: null,
+      segmentInfo: undefined,
     });
 
     sidebarRPCCall.resetHistory();
@@ -1399,7 +1512,7 @@ describe('Guest', () => {
       metadata: {
         title: 'Page 2',
       },
-      frameIdentifier: null,
+      segmentInfo: undefined,
     });
   });
 

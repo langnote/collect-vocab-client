@@ -1,4 +1,5 @@
 import { delay, waitFor } from '../../../test-util/wait';
+import { FeatureFlags } from '../../features';
 import {
   VitalSourceInjector,
   VitalSourceContentIntegration,
@@ -54,18 +55,25 @@ class FakeVitalSourceViewer {
 }
 
 describe('annotator/integrations/vitalsource', () => {
+  let featureFlags;
   let fakeViewer;
   let FakeHTMLIntegration;
   let fakeHTMLIntegration;
   let fakeInjectClient;
 
   beforeEach(() => {
+    featureFlags = new FeatureFlags();
     fakeViewer = new FakeVitalSourceViewer();
 
     fakeHTMLIntegration = {
       anchor: sinon.stub(),
       contentContainer: sinon.stub(),
-      describe: sinon.stub(),
+      describe: sinon.stub().returns([
+        {
+          type: 'TextQuoteSelector',
+          exact: 'dummy selection',
+        },
+      ]),
       destroy: sinon.stub(),
       fitSideBySide: sinon.stub().returns(false),
       scrollToAnchor: sinon.stub(),
@@ -129,7 +137,12 @@ describe('annotator/integrations/vitalsource', () => {
 
     it('injects client into content frame', async () => {
       await waitFor(() => fakeInjectClient.called);
-      assert.calledWith(fakeInjectClient, fakeViewer.contentFrame, fakeConfig);
+      assert.calledWith(
+        fakeInjectClient,
+        fakeViewer.contentFrame,
+        fakeConfig,
+        'vitalsource-content'
+      );
     });
 
     [
@@ -188,17 +201,69 @@ describe('annotator/integrations/vitalsource', () => {
     });
   });
 
+  class FakeMosaicBookElement {
+    constructor() {
+      this._format = 'epub';
+
+      this.goToCfi = sinon.stub();
+      this.goToURL = sinon.stub();
+    }
+
+    selectEPUBBook() {
+      this._format = 'epub';
+    }
+
+    selectPDFBook() {
+      this._format = 'pbk';
+    }
+
+    getBookInfo() {
+      return {
+        format: this._format,
+        title: 'Test book title',
+        isbn: 'TEST-BOOK-ID',
+      };
+    }
+
+    async getCurrentPage() {
+      if (this._format === 'epub') {
+        return {
+          absoluteURL: '/pages/chapter_02.xhtml',
+          cfi: '/2',
+          chapterTitle: 'Chapter two',
+          index: 1,
+          page: '20',
+        };
+      } else if (this._format === 'pbk') {
+        return {
+          absoluteURL: '/pages/2',
+          cfi: '/1',
+          index: 1,
+          page: '2',
+          chapterTitle: 'First chapter',
+        };
+      } else {
+        throw new Error('Unknown book');
+      }
+    }
+  }
+
   describe('VitalSourceContentIntegration', () => {
     let integrations;
+    let fakeBookElement;
 
     function createIntegration() {
-      const integration = new VitalSourceContentIntegration();
+      const integration = new VitalSourceContentIntegration(document.body, {
+        features: featureFlags,
+        bookElement: fakeBookElement,
+      });
       integrations.push(integration);
       return integration;
     }
 
     beforeEach(() => {
       integrations = [];
+      fakeBookElement = new FakeMosaicBookElement();
     });
 
     afterEach(() => {
@@ -207,7 +272,12 @@ describe('annotator/integrations/vitalsource', () => {
 
     it('allows annotation', () => {
       const integration = createIntegration();
-      assert.equal(integration.canAnnotate(), true);
+      assert.isTrue(integration.canAnnotate());
+    });
+
+    it('asks guest to wait for feature flags before sending document info', () => {
+      const integration = createIntegration();
+      assert.isTrue(integration.waitForFeatureFlags());
     });
 
     it('delegates to HTMLIntegration for side-by-side mode', () => {
@@ -259,12 +329,158 @@ describe('annotator/integrations/vitalsource', () => {
       assert.calledWith(fakeHTMLIntegration.scrollToAnchor, anchor);
     });
 
-    describe('#getMetadata', () => {
-      it('returns book metadata', async () => {
+    context('when "book_as_single_document" flag is on', () => {
+      beforeEach(() => {
+        featureFlags.update({ book_as_single_document: true });
+      });
+
+      it('adds selector for current EPUB book Content Document', async () => {
         const integration = createIntegration();
-        const metadata = await integration.getMetadata();
-        assert.equal(metadata.title, document.title);
-        assert.deepEqual(metadata.link, []);
+        integration.contentContainer();
+        assert.calledWith(fakeHTMLIntegration.contentContainer);
+
+        const range = new Range();
+        const selectors = await integration.describe(range);
+
+        const cfiSelector = selectors.find(
+          s => s.type === 'EPUBContentSelector'
+        );
+
+        assert.ok(cfiSelector);
+        assert.deepEqual(cfiSelector, {
+          type: 'EPUBContentSelector',
+          url: '/pages/chapter_02.xhtml',
+          cfi: '/2',
+          title: 'Chapter two',
+        });
+
+        const pageSelector = selectors.find(s => s.type === 'PageSelector');
+        assert.notOk(pageSelector);
+      });
+
+      it('adds selector for current PDF book page', async () => {
+        fakeBookElement.selectPDFBook();
+
+        const integration = createIntegration();
+        integration.contentContainer();
+        assert.calledWith(fakeHTMLIntegration.contentContainer);
+
+        const range = new Range();
+        const selectors = await integration.describe(range);
+        const cfiSelector = selectors.find(
+          s => s.type === 'EPUBContentSelector'
+        );
+
+        assert.ok(cfiSelector);
+        assert.deepEqual(cfiSelector, {
+          type: 'EPUBContentSelector',
+          url: '/pages/2',
+          cfi: '/1',
+          title: 'First chapter',
+        });
+
+        const pageSelector = selectors.find(s => s.type === 'PageSelector');
+        assert.ok(pageSelector);
+        assert.deepEqual(pageSelector, {
+          type: 'PageSelector',
+          index: 1,
+          label: '2',
+        });
+      });
+    });
+
+    describe('#getMetadata', () => {
+      context('when "book_as_single_document" flag is off', () => {
+        it('returns metadata for current page/chapter', async () => {
+          const integration = createIntegration();
+          const metadata = await integration.getMetadata();
+          assert.equal(metadata.title, document.title);
+          assert.deepEqual(metadata.link, []);
+        });
+      });
+
+      context('when "book_as_single_document" flag is on', () => {
+        beforeEach(() => {
+          featureFlags.update({ book_as_single_document: true });
+        });
+
+        it('returns book metadata', async () => {
+          const integration = createIntegration();
+          const metadata = await integration.getMetadata();
+          assert.equal(metadata.title, 'Test book title');
+          assert.deepEqual(metadata.link, []);
+        });
+      });
+    });
+
+    describe('#navigateToSegment', () => {
+      function createAnnotationWithSelector(selector) {
+        return {
+          target: [
+            {
+              selector: [selector],
+            },
+          ],
+        };
+      }
+
+      [
+        {
+          // Annotation with no selectors identifying a segment.
+          type: 'TextQuoteSelector',
+          exact: 'foo',
+        },
+        {
+          // Segment selector with no CFI or URL
+          type: 'EPUBContentSelector',
+        },
+      ].forEach(selector => {
+        it('throws if annotation has no segment info available', () => {
+          const integration = createIntegration();
+          const ann = createAnnotationWithSelector(selector);
+          assert.throws(() => {
+            integration.navigateToSegment(ann);
+          }, 'No segment information available');
+
+          assert.notCalled(fakeBookElement.goToCfi);
+          assert.notCalled(fakeBookElement.goToURL);
+        });
+      });
+
+      it('navigates to CFI if available', () => {
+        const integration = createIntegration();
+        const ann = createAnnotationWithSelector({
+          type: 'EPUBContentSelector',
+          cfi: '/2/4',
+          url: '/chapters/02.xhtml',
+        });
+
+        integration.navigateToSegment(ann);
+
+        assert.calledWith(fakeBookElement.goToCfi, '/2/4');
+      });
+
+      it('navigates to URL if no CFI available', () => {
+        const integration = createIntegration();
+        const ann = createAnnotationWithSelector({
+          type: 'EPUBContentSelector',
+          url: '/chapters/02.xhtml',
+        });
+
+        integration.navigateToSegment(ann);
+
+        assert.calledWith(fakeBookElement.goToURL, '/chapters/02.xhtml');
+      });
+    });
+
+    describe('#segmentInfo', () => {
+      it('returns metadata for current page/chapter', async () => {
+        const integration = createIntegration();
+        const segment = await integration.segmentInfo();
+        assert.deepEqual(segment, {
+          cfi: '/2',
+          url: '/pages/chapter_02.xhtml',
+        });
       });
     });
 
@@ -279,16 +495,43 @@ describe('annotator/integrations/vitalsource', () => {
         history.back();
       });
 
-      it('returns book URL excluding query string', async () => {
+      context('when "book_as_single_document" flag is off', () => {
+        it('returns book chapter URL excluding query string', async () => {
+          const integration = createIntegration();
+          const uri = await integration.uri();
+          const parsedURL = new URL(uri);
+          assert.equal(parsedURL.hostname, document.location.hostname);
+          assert.equal(
+            parsedURL.pathname,
+            '/books/abc/epub/OPS/xhtml/chapter_001.html'
+          );
+          assert.equal(parsedURL.search, '');
+        });
+      });
+
+      context('when "book_as_single_document" flag is on', () => {
+        it('returns book reader URL', async () => {
+          featureFlags.update({ book_as_single_document: true });
+          const integration = createIntegration();
+          const uri = await integration.uri();
+          assert.equal(
+            uri,
+            'https://bookshelf.vitalsource.com/reader/books/TEST-BOOK-ID'
+          );
+        });
+      });
+
+      it('updates when "book_as_single_document" flag changes', async () => {
+        const uriChanged = sinon.stub();
         const integration = createIntegration();
-        const uri = await integration.uri();
-        const parsedURL = new URL(uri);
-        assert.equal(parsedURL.hostname, document.location.hostname);
-        assert.equal(
-          parsedURL.pathname,
-          '/books/abc/epub/OPS/xhtml/chapter_001.html'
-        );
-        assert.equal(parsedURL.search, '');
+        integration.on('uriChanged', uriChanged);
+        const uri1 = await integration.uri();
+
+        featureFlags.update({ book_as_single_document: true });
+
+        assert.calledOnce(uriChanged);
+        const uri2 = await integration.uri();
+        assert.notEqual(uri1, uri2);
       });
     });
 

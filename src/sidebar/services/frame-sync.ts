@@ -2,27 +2,38 @@ import debounce from 'lodash.debounce';
 import shallowEqual from 'shallowequal';
 
 import { ListenerCollection } from '../../shared/listener-collection';
-import { PortFinder, PortRPC, isMessageEqual } from '../../shared/messaging';
+import {
+  PortFinder,
+  PortRPC,
+  isMessage,
+  isMessageEqual,
+} from '../../shared/messaging';
 import { isReply, isPublic } from '../helpers/annotation-metadata';
+import { annotationMatchesSegment } from '../helpers/annotation-segment';
 import { watch } from '../util/watch';
 
-/**
- * @typedef {import('../../types/annotator').AnnotationData} AnnotationData
- * @typedef {import('../../types/annotator').DocumentMetadata} DocumentMetadata
- * @typedef {import('../../types/api').Annotation} Annotation
- * @typedef {import('../../types/port-rpc-events').SidebarToHostEvent} SidebarToHostEvent
- * @typedef {import('../../types/port-rpc-events').HostToSidebarEvent} HostToSidebarEvent
- * @typedef {import('../../types/port-rpc-events').SidebarToGuestEvent} SidebarToGuestEvent
- * @typedef {import('../../types/port-rpc-events').GuestToSidebarEvent} GuestToSidebarEvent
- * @typedef {import('../store/modules/frames').Frame} Frame
- */
+import type { Message } from '../../shared/messaging';
+import type {
+  AnnotationData,
+  DocumentMetadata,
+  SegmentInfo,
+} from '../../types/annotator';
+import type { Annotation } from '../../types/api';
+import type {
+  SidebarToHostEvent,
+  HostToSidebarEvent,
+  SidebarToGuestEvent,
+  GuestToSidebarEvent,
+} from '../../types/port-rpc-events';
+import type { SidebarStore } from '../store';
+import type { Frame } from '../store/modules/frames';
+import type { AnnotationsService } from './annotations';
 
-/**
- * @typedef DocumentInfo
- * @prop {string|null} frameIdentifier
- * @prop {string} uri
- * @prop {DocumentMetadata} metadata
- */
+type DocumentInfo = {
+  uri: string;
+  metadata: DocumentMetadata;
+  segmentInfo?: SegmentInfo;
+};
 
 /**
  * Return a minimal representation of an annotation that can be sent from the
@@ -31,12 +42,15 @@ import { watch } from '../util/watch';
  * Because this representation will be exposed to untrusted third-party
  * JavaScript, it includes only the information needed to uniquely identify it
  * within the current session and anchor it in the document.
- *
- * @param {Annotation} annotation
- * @return {AnnotationData}
  */
-export function formatAnnot({ $tag, target, uri }) {
+export function formatAnnot({
+  $cluster,
+  $tag,
+  target,
+  uri,
+}: Annotation): AnnotationData {
   return {
+    $cluster,
     $tag,
     target,
     uri,
@@ -45,11 +59,8 @@ export function formatAnnot({ $tag, target, uri }) {
 
 /**
  * Return the frame which best matches an annotation.
- *
- * @param {Frame[]} frames
- * @param {Annotation} ann
  */
-function frameForAnnotation(frames, ann) {
+function frameForAnnotation(frames: Frame[], ann: Annotation): Frame | null {
   // Choose frame with an exact URL match if possible. In the unlikely situation
   // where multiple frames have the same URL, we'll use whichever connected first.
   const uriMatch = frames.find(f => f.uri === ann.uri);
@@ -65,7 +76,7 @@ function frameForAnnotation(frames, ann) {
 
   // If there is no main frame (eg. in VitalSource), fall back to whichever
   // frame connected first.
-  return frames[0];
+  return frames[0] ?? null;
 }
 
 /**
@@ -89,12 +100,55 @@ function frameForAnnotation(frames, ann) {
  * @inject
  */
 export class FrameSyncService {
+  private _annotationsService: AnnotationsService;
+
   /**
-   * @param {Window} $window - Test seam
-   * @param {import('./annotations').AnnotationsService} annotationsService
-   * @param {import('../store').SidebarStore} store
+   * Map of guest frame ID to channel for communicating with guest.
+   *
+   * The ID will be `null` for the "main" guest, which is usually the one in
+   * the host frame.
    */
-  constructor($window, annotationsService, store) {
+  private _guestRPC: Map<
+    string | null,
+    PortRPC<GuestToSidebarEvent, SidebarToGuestEvent>
+  >;
+
+  /** Whether highlights are visible in guest frames. */
+  private _highlightsVisible: boolean;
+
+  /**
+   * Channel for sidebar-host communication.
+   */
+  private _hostRPC: PortRPC<HostToSidebarEvent, SidebarToHostEvent>;
+
+  /**
+   * Tags of annotations that are currently loaded into guest frames.
+   */
+  private _inFrame: Set<string>;
+
+  private _listeners: ListenerCollection;
+  private _portFinder: PortFinder;
+  private _store: SidebarStore;
+
+  /**
+   * ID of an annotation that should be scrolled to after anchoring completes.
+   *
+   * This is set when {@link scrollToAnnotation} is called and the document
+   * needs to be navigated to a different URL. This can happen in EPUBs.
+   *
+   * We store an ID rather than a tag because the navigation currently triggers
+   * a reload of annotations, which will change their tags but not their IDs.
+   */
+  private _pendingScrollToId: string | null;
+
+  // Test seam
+  private _window: Window;
+
+  constructor(
+    $window: Window,
+    annotationsService: AnnotationsService,
+    store: SidebarStore
+  ) {
     this._window = $window;
     this._annotationsService = annotationsService;
     this._store = store;
@@ -104,33 +158,11 @@ export class FrameSyncService {
     });
     this._listeners = new ListenerCollection();
 
-    /**
-     * Channel for sidebar-host communication.
-     *
-     * @type {PortRPC<HostToSidebarEvent, SidebarToHostEvent>}
-     */
     this._hostRPC = new PortRPC();
-
-    /**
-     * Map of guest frame ID to channel for communicating with guest.
-     *
-     * The ID will be `null` for the "main" guest, which is usually the one in
-     * the host frame.
-     *
-     * @type {Map<string|null, PortRPC<GuestToSidebarEvent, SidebarToGuestEvent>>}
-     */
     this._guestRPC = new Map();
-    this._nextGuestId = 0;
-
-    /**
-     * Tags of annotations that are currently loaded into guest frames.
-     *
-     * @type {Set<string>}
-     */
-    this._inFrame = new Set();
-
-    /** Whether highlights are visible in guest frames. */
+    this._inFrame = new Set<string>();
     this._highlightsVisible = false;
+    this._pendingScrollToId = null;
 
     this._setupSyncToGuests();
     this._setupHostEvents();
@@ -146,21 +178,15 @@ export class FrameSyncService {
 
     /**
      * Handle annotations or frames being added or removed in the store.
-     *
-     * @param {Annotation[]} annotations
-     * @param {Frame[]} frames
-     * @param {Annotation[]} prevAnnotations
      */
     const onStoreAnnotationsChanged = (
-      annotations,
-      frames,
-      prevAnnotations
+      annotations: Annotation[],
+      frames: Frame[],
+      prevAnnotations: Annotation[]
     ) => {
       let publicAnns = 0;
-      /** @type {Set<string>} */
-      const inSidebar = new Set();
-      /** @type {Annotation[]} */
-      const added = [];
+      const inSidebar = new Set<string>();
+      const added = [] as Annotation[];
 
       // Determine which annotations have been added or deleted in the sidebar.
       annotations.forEach(annot => {
@@ -184,11 +210,15 @@ export class FrameSyncService {
 
       // Send added annotations to matching frame.
       if (added.length > 0) {
-        /** @type {Map<string|null, Annotation[]>} */
-        const addedByFrame = new Map();
-        for (let annotation of added) {
+        const addedByFrame = new Map<string | null, Annotation[]>();
+
+        for (const annotation of added) {
           const frame = frameForAnnotation(frames, annotation);
-          if (!frame) {
+          if (
+            !frame ||
+            (frame.segment &&
+              !annotationMatchesSegment(annotation, frame.segment))
+          ) {
             continue;
           }
           const anns = addedByFrame.get(frame.id) ?? [];
@@ -196,7 +226,7 @@ export class FrameSyncService {
           addedByFrame.set(frame.id, anns);
         }
 
-        for (let [frameId, anns] of addedByFrame) {
+        for (const [frameId, anns] of addedByFrame) {
           const rpc = this._guestRPC.get(frameId);
           if (rpc) {
             rpc.call('loadAnnotations', anns.map(formatAnnot));
@@ -229,11 +259,7 @@ export class FrameSyncService {
 
     watch(
       this._store.subscribe,
-      () =>
-        /** @type {const} */ ([
-          this._store.allAnnotations(),
-          this._store.frames(),
-        ]),
+      () => [this._store.allAnnotations(), this._store.frames()] as const,
       ([annotations, frames], [prevAnnotations]) =>
         onStoreAnnotationsChanged(annotations, frames, prevAnnotations),
       shallowEqual
@@ -255,90 +281,66 @@ export class FrameSyncService {
   /**
    * Set up a connection to a new guest frame.
    *
-   * @param {MessagePort} port - Port for communicating with the guest
+   * @param port - Port for communicating with the guest
+   * @param sourceId - Identifier for the guest frame
    */
-  _connectGuest(port) {
-    /** @type {PortRPC<GuestToSidebarEvent, SidebarToGuestEvent>} */
-    const guestRPC = new PortRPC();
+  _connectGuest(port: MessagePort, sourceId: string | null) {
+    const guestRPC = new PortRPC<GuestToSidebarEvent, SidebarToGuestEvent>();
 
-    // Add guest RPC to map with a temporary ID until we learn the real ID.
-    //
-    // We need to add the guest to the map immediately so that any notifications
-    // sent from this service to all guests, before we learn the real frame ID,
-    // are sent to this new guest.
-    ++this._nextGuestId;
-    let frameIdentifier = /** @type {string|null} */ (
-      `temp-${this._nextGuestId}`
-    );
-    this._guestRPC.set(frameIdentifier, guestRPC);
+    this._guestRPC.set(sourceId, guestRPC);
 
-    // Update document metadata for this guest. We currently assume that the
-    // guest will make this call once after it connects. To handle updates
-    // to the document, we'll need to change `connectFrame` to update rather than
-    // add to the frame list.
-    guestRPC.on(
-      'documentInfoChanged',
-      /** @param {DocumentInfo} info */
-      info => {
-        this._guestRPC.delete(frameIdentifier);
-
-        frameIdentifier = info.frameIdentifier;
-        this._guestRPC.set(frameIdentifier, guestRPC);
-
-        this._store.connectFrame({
-          id: info.frameIdentifier,
-          metadata: info.metadata,
-          uri: info.uri,
-        });
-      }
-    );
+    // Update document metadata for this guest. The guest will call this method
+    // immediately after it connects to the sidebar. It may call it again
+    // later if the document in the guest frame is navigated.
+    guestRPC.on('documentInfoChanged', (info: DocumentInfo) => {
+      this._store.connectFrame({
+        id: sourceId,
+        metadata: info.metadata,
+        uri: info.uri,
+        segment: info.segmentInfo,
+      });
+    });
 
     // TODO - Close connection if we don't receive a "connect" message within
     // a certain time frame.
 
     guestRPC.on('close', () => {
-      const frame = this._store.frames().find(f => f.id === frameIdentifier);
+      const frame = this._store.frames().find(f => f.id === sourceId);
       if (frame) {
         this._store.destroyFrame(frame);
       }
       guestRPC.destroy();
-      this._guestRPC.delete(frameIdentifier);
+      this._guestRPC.delete(sourceId);
     });
 
     // A new annotation, note or highlight was created in the frame
-    guestRPC.on(
-      'createAnnotation',
-      /** @param {AnnotationData} annot */
-      annot => {
-        // If user is not logged in, we can't really create a meaningful highlight
-        // or annotation. Instead, we need to open the sidebar, show an error,
-        // and delete the (unsaved) annotation so it gets un-selected in the
-        // target document
-        if (!this._store.isLoggedIn()) {
-          this._hostRPC.call('openSidebar');
-          this._store.openSidebarPanel('loginPrompt');
-          this._guestRPC.forEach(rpc =>
-            rpc.call('deleteAnnotation', annot.$tag)
-          );
-          return;
-        }
-        this._inFrame.add(annot.$tag);
-
-        // Open the sidebar so that the user can immediately edit the draft
-        // annotation.
-        if (!annot.$highlight) {
-          this._hostRPC.call('openSidebar');
-        }
-
-        // Ensure that the highlight for the newly-created annotation is visible.
-        // Currently we only support a single, shared visibility state for all highlights
-        // in all frames, so this will make all existing highlights visible too.
-        this._hostRPC.call('showHighlights');
-
-        // Create the new annotation in the sidebar.
-        this._annotationsService.create(annot);
+    guestRPC.on('createAnnotation', (annot: AnnotationData) => {
+      // If user is not logged in, we can't really create a meaningful highlight
+      // or annotation. Instead, we need to open the sidebar, show an error,
+      // and delete the (unsaved) annotation so it gets un-selected in the
+      // target document
+      if (!this._store.isLoggedIn()) {
+        this._hostRPC.call('openSidebar');
+        this._store.openSidebarPanel('loginPrompt');
+        this._guestRPC.forEach(rpc => rpc.call('deleteAnnotation', annot.$tag));
+        return;
       }
-    );
+      this._inFrame.add(annot.$tag);
+
+      // Open the sidebar so that the user can immediately edit the draft
+      // annotation.
+      if (!annot.$highlight) {
+        this._hostRPC.call('openSidebar');
+      }
+
+      // Ensure that the highlight for the newly-created annotation is visible.
+      // Currently we only support a single, shared visibility state for all highlights
+      // in all frames, so this will make all existing highlights visible too.
+      this._hostRPC.call('showHighlights');
+
+      // Create the new annotation in the sidebar.
+      this._annotationsService.create(annot);
+    });
 
     // Map of annotation tag to anchoring status
     // ('anchored'|'orphan'|'timeout').
@@ -346,32 +348,33 @@ export class FrameSyncService {
     // Updates are coalesced to reduce the overhead from processing
     // triggered by each `UPDATE_ANCHOR_STATUS` action that is dispatched.
 
-    /** @type {Record<string,'anchored'|'orphan'|'timeout'>} */
-    let anchoringStatusUpdates = {};
+    let anchoringStatusUpdates: Record<
+      string,
+      'anchored' | 'orphan' | 'timeout'
+    > = {};
     const scheduleAnchoringStatusUpdate = debounce(() => {
       this._store.updateAnchorStatus(anchoringStatusUpdates);
       anchoringStatusUpdates = {};
     }, 10);
 
     // Anchoring an annotation in the frame completed
-    guestRPC.on(
-      'syncAnchoringStatus',
-      /** @param {AnnotationData} annotation */
-      ({ $tag, $orphan }) => {
-        this._inFrame.add($tag);
-        anchoringStatusUpdates[$tag] = $orphan ? 'orphan' : 'anchored';
-        scheduleAnchoringStatusUpdate();
+    guestRPC.on('syncAnchoringStatus', ({ $tag, $orphan }: AnnotationData) => {
+      this._inFrame.add($tag);
+      anchoringStatusUpdates[$tag] = $orphan ? 'orphan' : 'anchored';
+      scheduleAnchoringStatusUpdate();
+
+      if (this._pendingScrollToId) {
+        const [id] = this._store.findIDsForTags([$tag]);
+        if (id === this._pendingScrollToId) {
+          this._pendingScrollToId = null;
+          guestRPC.call('scrollToAnnotation', $tag);
+        }
       }
-    );
+    });
 
     guestRPC.on(
       'showAnnotations',
-      /**
-       * @param {string[]} tags
-       * @param {boolean} focusFirstInSelection - Whether to give keyboard focus
-       *   to the first annotation in the selection.
-       */
-      (tags, focusFirstInSelection = false) => {
+      (tags: string[], focusFirstInSelection = false) => {
         // Since annotations are selected by ID rather than tag, this logic
         // currently only supports saved annotations.
         const ids = this._store.findIDsForTags(tags);
@@ -393,19 +396,13 @@ export class FrameSyncService {
       }
     );
 
-    guestRPC.on(
-      'hoverAnnotations',
-      /** @param {string[]} tags */ tags => {
-        this._store.hoverAnnotations(tags || []);
-      }
-    );
+    guestRPC.on('hoverAnnotations', (tags: string[]) => {
+      this._store.hoverAnnotations(tags || []);
+    });
 
-    guestRPC.on(
-      'toggleAnnotationSelection',
-      /** @param {string[]} tags */ tags => {
-        this._store.toggleSelectedAnnotations(this._store.findIDsForTags(tags));
-      }
-    );
+    guestRPC.on('toggleAnnotationSelection', (tags: string[]) => {
+      this._store.toggleSelectedAnnotations(this._store.findIDsForTags(tags));
+    });
 
     guestRPC.on('openSidebar', () => {
       this._hostRPC.call('openSidebar');
@@ -443,15 +440,10 @@ export class FrameSyncService {
 
     // When user toggles the highlight visibility control in the sidebar container,
     // update the visibility in all the guest frames.
-    this._hostRPC.on(
-      'setHighlightsVisible',
-      /** @param {boolean} visible */ visible => {
-        this._highlightsVisible = visible;
-        this._guestRPC.forEach(rpc =>
-          rpc.call('setHighlightsVisible', visible)
-        );
-      }
-    );
+    this._hostRPC.on('setHighlightsVisible', (visible: boolean) => {
+      this._highlightsVisible = visible;
+      this._guestRPC.forEach(rpc => rpc.call('setHighlightsVisible', visible));
+    });
   }
 
   /**
@@ -460,10 +452,9 @@ export class FrameSyncService {
   _setupFeatureFlagSync() {
     const getFlags = () => this._store.profile().features;
 
-    /** @param {Record<string, boolean>} flags */
-    const sendFlags = flags => {
+    const sendFlags = (flags: Record<string, boolean>) => {
       this._hostRPC.call('featureFlagsUpdated', flags);
-      for (let guest of this._guestRPC.values()) {
+      for (const guest of this._guestRPC.values()) {
         guest.call('featureFlagsUpdated', flags);
       }
     };
@@ -487,25 +478,28 @@ export class FrameSyncService {
     // Listen for guests connecting to the sidebar.
     this._listeners.add(hostPort, 'message', event => {
       const { data, ports } = event;
+
+      const message = data as Message | unknown;
+      if (!isMessage(message)) {
+        return;
+      }
+
       if (
-        isMessageEqual(data, {
+        isMessageEqual(message, {
           frame1: 'guest',
           frame2: 'sidebar',
           type: 'offer',
         })
       ) {
-        this._connectGuest(ports[0]);
+        this._connectGuest(ports[0], message.sourceId ?? null);
       }
     });
   }
 
   /**
    * Send an RPC message to the host frame.
-   *
-   * @param {SidebarToHostEvent} method
-   * @param {unknown[]} args
    */
-  notifyHost(method, ...args) {
+  notifyHost(method: SidebarToHostEvent, ...args: unknown[]) {
     this._hostRPC.call(method, ...args);
   }
 
@@ -515,20 +509,43 @@ export class FrameSyncService {
    * This is used to indicate the highlights in the document that correspond
    * to hovered annotations in the sidebar.
    *
-   * @param {string[]} tags - annotation $tags
+   * @param tags - annotation $tags
    */
-  hoverAnnotations(tags) {
+  hoverAnnotations(tags: string[]) {
     this._store.hoverAnnotations(tags);
     this._guestRPC.forEach(rpc => rpc.call('hoverAnnotations', tags));
   }
 
   /**
-   * Scroll the frame to the highlight for an annotation with a given tag.
-   *
-   * @param {string} tag
+   * Scroll the frame to the highlight for an annotation.
    */
-  scrollToAnnotation(tag) {
-    this._guestRPC.forEach(rpc => rpc.call('scrollToAnnotation', tag));
+  scrollToAnnotation(ann: Annotation) {
+    const frame = frameForAnnotation(this._store.frames(), ann);
+    if (!frame) {
+      return;
+    }
+    const guest = this._guestRPC.get(frame?.id);
+    if (!guest) {
+      return;
+    }
+
+    // If this annotation is for a different segment of a book than is loaded
+    // in the guest, then ask the guest to navigate to the appropriate segment.
+    //
+    // In EPUBs, this will cause the guest to disconnect and a new guest will
+    // connect when the new content has loaded. We will then need to wait for
+    // the annotation to anchor in the new guest frame before we can actually
+    // scroll to it.
+    if (frame.segment && !annotationMatchesSegment(ann, frame.segment)) {
+      if (ann.id) {
+        // Schedule scroll once anchoring completes.
+        this._pendingScrollToId = ann.id;
+      }
+      guest.call('navigateToSegment', formatAnnot(ann));
+      return;
+    }
+
+    guest.call('scrollToAnnotation', ann.$tag);
   }
 
   // Only used to cleanup tests

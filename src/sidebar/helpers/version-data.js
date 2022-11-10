@@ -1,32 +1,22 @@
 /**
- * @typedef AuthState
+ * @typedef {import('../../types/annotator').SegmentInfo} SegmentInfo
+ * @typedef {import('../store/modules/frames').Frame} Frame
+ */
+
+/**
+ * @typedef UserDetails
  * @prop {string|null} [userid]
  * @prop {string} [displayName]
  */
 
-/**
- * An object representing document metadata.
- *
- * @typedef DocMetadata
- * @prop {string=} documentFingerprint - Optional PDF fingerprint for current document
- */
-
-/**
- * An object representing document info.
- *
- * @typedef DocumentInfo
- * @prop {string=} [uri] - Current document URL
- * @prop {DocMetadata} [metadata] - Document metadata
- */
-
 export class VersionData {
   /**
-   * @param {AuthState} userInfo
-   * @param {DocumentInfo[]} documentInfo - Metadata for connected frames.
+   * @param {UserDetails} userInfo
+   * @param {Frame[]} documentFrames - Metadata for connected frames.
    *   If there are multiple frames, the "main" one should be listed first.
    * @param {Window} window_ - test seam
    */
-  constructor(userInfo, documentInfo, window_ = window) {
+  constructor(userInfo, documentFrames, window_ = window) {
     const noValueString = 'N/A';
 
     let accountString = noValueString;
@@ -39,14 +29,29 @@ export class VersionData {
 
     this.version = '__VERSION__';
     this.userAgent = window_.navigator.userAgent;
-    this.urls = documentInfo.map(di => di.uri).join(', ') || noValueString;
+    this.urls = documentFrames.map(df => df.uri).join(', ') || noValueString;
 
     // We currently assume that only the main (first) frame may have a fingerprint.
     this.fingerprint =
-      documentInfo[0]?.metadata?.documentFingerprint ?? noValueString;
+      documentFrames[0]?.metadata?.documentFingerprint ?? noValueString;
 
     this.account = accountString;
     this.timestamp = new Date().toString();
+
+    const segmentInfo = documentFrames[0]?.segment;
+    if (segmentInfo) {
+      const segmentFields = [];
+      if (segmentInfo.cfi) {
+        segmentFields.push(['CFI', segmentInfo.cfi]);
+      }
+      if (segmentInfo.url) {
+        segmentFields.push(['URL', segmentInfo.url]);
+      }
+
+      this.segment = segmentFields
+        .map(([field, value]) => `${field}: ${value}`)
+        .join(', ');
+    }
   }
 
   /**

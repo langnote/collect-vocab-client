@@ -8,15 +8,16 @@ import { preserveScrollPosition } from './html-side-by-side';
 import { ImageTextLayer } from './image-text-layer';
 import { injectClient } from '../hypothesis-injector';
 
-/**
- * @typedef {import('../../types/annotator').Anchor} Anchor
- * @typedef {import('../../types/annotator').Annotator} Annotator
- * @typedef {import('../../types/annotator').Integration} Integration
- * @typedef {import('../../types/annotator').Selector} Selector
- * @typedef {import('../../types/annotator').SidebarLayout} SidebarLayout
- * @typedef {import('../hypothesis-injector').InjectConfig} InjectConfig
- * @typedef {import('../../types/api').Context} Context
- */
+import type {
+  Anchor,
+  AnnotationData,
+  FeatureFlags as IFeatureFlags,
+  Integration,
+  SegmentInfo,
+  SidebarLayout,
+} from '../../types/annotator';
+import type { EPUBContentSelector, Selector } from '../../types/api';
+import type { InjectConfig } from '../hypothesis-injector';
 
 // When activating side-by-side mode for VitalSource PDF documents, make sure
 // at least this much space (in pixels) is left for the PDF document. Any
@@ -24,21 +25,124 @@ import { injectClient } from '../hypothesis-injector';
 const MIN_CONTENT_WIDTH = 480;
 
 /**
+ * Book metadata exposed by the VitalSource viewer.
+ */
+type BookInfo = {
+  /**
+   * Indicates the book type. "epub" means the book was created from an EPUB
+   * and the content is XHTML. "pbk" means the book was created from a PDF and
+   * has a fixed layout.
+   */
+  format: 'epub' | 'pbk';
+
+  /**
+   * VitalSource book ID ("vbid"). This identifier is _usually_ the book's
+   * ISBN, hence the field name. However this value is not always a valid ISBN.
+   */
+  isbn: string;
+  title: string;
+};
+
+/**
+ * Metadata about a segment of a VitalSource book.
+ *
+ * Some VS APIs refer to a segment as a "page" (see
+ * {@link MosaicBookElement.getCurrentPage} but the amount of content in
+ * a segment depends on the book type and publisher. In a PDF-based book,
+ * each segment corresponds to a single page of a PDF. In an EPUB-based book,
+ * a segment is a single "Content Document" within the EPUB. This typically
+ * corresponds to one chapter of the book, but it could be more or less
+ * granular.
+ */
+type PageInfo = {
+  /**
+   * Path of the resource within the book that contains the segment's resources.
+   *
+   * eg. In an EPUB a content document might have a URL such as
+   * "https://jigsaw.vitalsource.com/books/1234/epub/OEBPS/html/chapter06.html". The corresponding
+   * `absoluteURL` entry would be "/books/1234/epub/OEBPS/html/chapter06.html".
+   */
+  absoluteURL: string;
+
+  /**
+   * Identifies the entry in the EPUB's table of contents that corresponds to
+   * this page/segment.
+   *
+   * See https://idpf.org/epub/linking/cfi/#sec-path-res.
+   *
+   * For PDF-based books, VitalSource creates a synthetic CFI which is the page
+   * index, eg. "/1" for the second page.
+   */
+  cfi: string;
+
+  /**
+   * The page label for the first page of the segment. This is the page number
+   * that is displayed in the VitalSource navigation controls when the
+   * chapter is scrolled to the top.
+   */
+  page: string;
+
+  /**
+   * Index of the current segment within the sequence of pages or content
+   * documents that make up the book.
+   */
+  index: number;
+
+  /**
+   * Title of the entry in the table of contents that refers to the current
+   * segment. For PDF-based books, a chapter will often have multiple pages
+   * and all these pages will have the same title. In EPUBs, each content
+   * document will typically have a different title.
+   */
+  chapterTitle: string;
+};
+
+/**
+ * `<mosaic-book>` custom element in the VitalSource container frame.
+ *
+ * This element is part of the VitalSource viewer. It contains the book content
+ * inside a frame within its Shadow DOM, and also has methods that can be used
+ * to fetch book metadata, get the current location and navigate the book.
+ */
+type MosaicBookElement = HTMLElement & {
+  /** Returns metadata about the currently loaded book. */
+  getBookInfo(): BookInfo;
+
+  /**
+   * Returns metadata about the current page (in a PDF-based book) or
+   * chapter/segment (in an EPUB-based book).
+   */
+  getCurrentPage(): Promise<PageInfo>;
+
+  /**
+   * Navigate the book to the page or content document whose CFI matches `cfi`.
+   */
+  goToCfi(cfi: string): void;
+
+  /**
+   * Navigate the book to the page or content document whose URL matches `url`.
+   */
+  goToURL(url: string): void;
+};
+
+/**
  * Return the custom DOM element that contains the book content iframe.
  */
-function findBookElement(document_ = document) {
-  return document_.querySelector('mosaic-book');
+function findBookElement(document_ = document): MosaicBookElement | null {
+  return document_.querySelector('mosaic-book') as MosaicBookElement | null;
 }
 
 /**
  * Return the role of the current frame in the VitalSource Bookshelf reader or
  * `null` if the frame is not part of Bookshelf.
  *
- * @return {'container'|'content'|null} - `container` if this is the parent of
- *   the content frame, `content` if this is the frame that contains the book
- *   content or `null` if the document is not part of the Bookshelf reader.
+ * @return `container` if this is the parent of the content frame, `content` if
+ *   this is the frame that contains the book content or `null` if the document is
+ *   not part of the Bookshelf reader.
  */
-export function vitalSourceFrameRole(window_ = window) {
+export function vitalSourceFrameRole(
+  window_ = window
+): 'container' | 'content' | null {
   if (findBookElement(window_.document)) {
     return 'container';
   }
@@ -71,20 +175,21 @@ export function vitalSourceFrameRole(window_ = window) {
  * content frames when they are created.
  */
 export class VitalSourceInjector {
+  private _frameObserver: MutationObserver;
+
   /**
-   * @param {InjectConfig} config - Configuration for injecting the client into
+   * @param config - Configuration for injecting the client into
    *   book content frames
    */
-  constructor(config) {
+  constructor(config: InjectConfig) {
     const bookElement = findBookElement();
     if (!bookElement) {
       throw new Error('Book container element not found');
     }
 
-    /** @type {WeakSet<HTMLIFrameElement>} */
-    const contentFrames = new WeakSet();
+    const contentFrames = new WeakSet<HTMLIFrameElement>();
 
-    const shadowRoot = /** @type {ShadowRoot} */ (bookElement.shadowRoot);
+    const shadowRoot = bookElement.shadowRoot!;
     const injectClientIntoContentFrame = () => {
       const frame = shadowRoot.querySelector('iframe');
       if (!frame || contentFrames.has(frame)) {
@@ -93,7 +198,13 @@ export class VitalSourceInjector {
       }
       contentFrames.add(frame);
       onDocumentReady(frame, (err, document_) => {
-        const body = document_?.body;
+        if (err) {
+          return;
+        }
+
+        // If `err` is null, then `document_` will be set.
+        const body = document_!.body;
+
         const isBookContent =
           body &&
           // Check that this is not the temporary page containing encrypted and
@@ -109,7 +220,7 @@ export class VitalSourceInjector {
           !body.querySelector('#page-content');
 
         if (isBookContent) {
-          injectClient(frame, config);
+          injectClient(frame, config, 'vitalsource-content');
         }
       });
     };
@@ -131,32 +242,31 @@ export class VitalSourceInjector {
  *
  * Coordinates are expressed in percentage distance from the top-left corner
  * of the rendered page.
- *
- * @typedef GlyphBox
- * @prop {number} l
- * @prop {number} r
- * @prop {number} t
- * @prop {number} b
  */
+type GlyphBox = {
+  l: number;
+  r: number;
+  t: number;
+  b: number;
+};
 
-/**
- * @typedef PDFGlyphData
- * @prop {GlyphBox[]} glyphs
- */
+type PDFGlyphData = {
+  glyphs: GlyphBox[];
+};
 
 /**
  * Data that the VitalSource book reader renders into the page about the
  * content and location of text in the image.
- *
- * @typedef PDFTextData
- * @prop {PDFGlyphData} glyphs - Locations of each text character in the page
- * @prop {string} words - The text in the page
  */
+type PDFTextData = {
+  /** Locations of each text character in the page */
+  glyphs: PDFGlyphData;
+  /** The text in the page */
+  words: string;
+};
 
 function getPDFPageImage() {
-  return /** @type {HTMLImageElement|null} */ (
-    document.querySelector('img#pbk-page')
-  );
+  return document.querySelector('img#pbk-page') as HTMLImageElement | null;
 }
 
 /**
@@ -167,10 +277,8 @@ function getPDFPageImage() {
  * Some VitalSource books (PDFs) make content scrolling work by making the
  * content iframe really tall and having the parent frame scroll. This stops the
  * Hypothesis bucket bar and scrolling annotations into view from working.
- *
- * @param {HTMLIFrameElement} frame
  */
-function makeContentFrameScrollable(frame) {
+function makeContentFrameScrollable(frame: HTMLIFrameElement) {
   if (frame.getAttribute('scrolling') !== 'no') {
     // This is a book (eg. EPUB) where the workaround is not required.
     return;
@@ -202,24 +310,57 @@ function makeContentFrameScrollable(frame) {
  *    of the adder.
  *  - Create a hidden text layer in PDF-based books, so the user can select text
  *    in the PDF image. This is similar to what PDF.js does for us in PDFs.
- *
- * @implements {Integration}
  */
-export class VitalSourceContentIntegration extends TinyEmitter {
-  /**
-   * @param {HTMLElement} container
-   */
-  constructor(container = document.body) {
+export class VitalSourceContentIntegration
+  extends TinyEmitter
+  implements Integration
+{
+  private _bookElement: MosaicBookElement;
+  private _features: IFeatureFlags;
+  private _htmlIntegration: HTMLIntegration;
+  private _listeners: ListenerCollection;
+  private _textLayer?: ImageTextLayer;
+
+  constructor(
+    /* istanbul ignore next - defaults are overridden in tests */
+    container: HTMLElement = document.body,
+    options: {
+      features: IFeatureFlags;
+      // Test seam
+      bookElement?: MosaicBookElement;
+    }
+  ) {
     super();
 
-    const features = new FeatureFlags();
+    this._features = options.features;
+
+    const bookElement =
+      options.bookElement ?? findBookElement(window.parent.document);
+    if (!bookElement) {
+      /* istanbul ignore next */
+      throw new Error(
+        'Failed to find <mosaic-book> element in container frame'
+      );
+    }
+    this._bookElement = bookElement;
+
+    // If the book_as_single_document flag changed, this will change the
+    // document URI returned by this integration.
+    this._features.on('flagsChanged', () => {
+      this.emit('uriChanged');
+    });
+
+    const htmlFeatures = new FeatureFlags();
 
     // Forcibly enable the side-by-side feature for VS books. This feature is
     // only behind a flag for regular web pages, which are typically more
     // complex and varied than EPUB books.
-    features.update({ html_side_by_side: true });
+    htmlFeatures.update({ html_side_by_side: true });
 
-    this._htmlIntegration = new HTMLIntegration({ container, features });
+    this._htmlIntegration = new HTMLIntegration({
+      container,
+      features: htmlFeatures,
+    });
 
     this._listeners = new ListenerCollection();
 
@@ -231,7 +372,7 @@ export class VitalSourceContentIntegration extends TinyEmitter {
     // event blocking must happen at the same level or higher in the DOM tree
     // than where SelectionObserver listens.
     const stopEvents = ['mouseup', 'mousedown', 'mouseout'];
-    for (let event of stopEvents) {
+    for (const event of stopEvents) {
       this._listeners.add(document.documentElement, event, e => {
         e.stopPropagation();
       });
@@ -240,7 +381,7 @@ export class VitalSourceContentIntegration extends TinyEmitter {
     // Install scrolling workaround for PDFs. We do this in the content frame
     // so that it works whether Hypothesis is loaded directly into the content
     // frame or injected by VitalSourceInjector from the parent frame.
-    const frame = /** @type {HTMLIFrameElement|null} */ (window.frameElement);
+    const frame = window.frameElement as HTMLIFrameElement | null;
     if (frame) {
       makeContentFrameScrollable(frame);
     }
@@ -249,8 +390,7 @@ export class VitalSourceContentIntegration extends TinyEmitter {
     // image.
     const bookImage = getPDFPageImage();
 
-    /** @type {PDFTextData|undefined} */
-    const pageData = /** @type {any} */ (window).innerPageData;
+    const pageData = (window as any).innerPageData as PDFTextData | undefined;
 
     if (bookImage && pageData) {
       const charRects = pageData.glyphs.glyphs.map(glyph => {
@@ -286,30 +426,53 @@ export class VitalSourceContentIntegration extends TinyEmitter {
     this._htmlIntegration.destroy();
   }
 
-  /**
-   * @param {HTMLElement} root
-   * @param {Selector[]} selectors
-   */
-  anchor(root, selectors) {
+  anchor(root: HTMLElement, selectors: Selector[]) {
     return this._htmlIntegration.anchor(root, selectors);
   }
 
-  /**
-   * @param {HTMLElement} root
-   * @param {Range} range
-   */
-  describe(root, range) {
-    return this._htmlIntegration.describe(root, range);
+  async describe(root: HTMLElement, range: Range) {
+    const selectors: Selector[] = this._htmlIntegration.describe(root, range);
+    if (!this._bookIsSingleDocument()) {
+      return selectors;
+    }
+
+    const pageInfo = await this._bookElement.getCurrentPage();
+
+    // We generate an "EPUBContentSelector" with a CFI for all VS books,
+    // although for PDF-based books the CFI is a string generated from the
+    // page number.
+    const extraSelectors: Selector[] = [
+      {
+        type: 'EPUBContentSelector',
+        cfi: pageInfo.cfi,
+        url: pageInfo.absoluteURL,
+        title: pageInfo.chapterTitle,
+      },
+    ];
+
+    // If this is a PDF-based book, add a page selector. PDFs always have page
+    // numbers available. EPUB-based books _may_ have information about how
+    // content maps to page numbers in a printed edition of the book. We
+    // currently limit page number selectors to PDFs until more is understood
+    // about when EPUB page numbers are reliable/likely to remain stable.
+    const bookInfo = this._bookElement.getBookInfo();
+    if (bookInfo.format === 'pbk') {
+      extraSelectors.push({
+        type: 'PageSelector',
+        index: pageInfo.index,
+        label: pageInfo.page,
+      });
+    }
+
+    selectors.push(...extraSelectors);
+
+    return selectors;
   }
 
   /**
    * Return the sentence from which the text is quoted.
-   *
-   * @param {HTMLElement} root
-   * @param {Range} range
-   * @return {Promise<Context>}
    */
-  provideContext(root, range) {
+  provideContext(root: HTMLElement, range: Range) {
     return this._htmlIntegration.provideContext(root, range);
   }
 
@@ -317,17 +480,12 @@ export class VitalSourceContentIntegration extends TinyEmitter {
     return this._htmlIntegration.contentContainer();
   }
 
-  /**
-   * @param {SidebarLayout} layout
-   */
-  fitSideBySide(layout) {
+  fitSideBySide(layout: SidebarLayout) {
     // For PDF books, handle side-by-side mode in this integration. For EPUBs,
     // delegate to the HTML integration.
     const bookImage = getPDFPageImage();
     if (bookImage && this._textLayer) {
-      const bookContainer = /** @type {HTMLElement} */ (
-        bookImage.parentElement
-      );
+      const bookContainer = bookImage.parentElement as HTMLElement;
       const textLayer = this._textLayer;
 
       // Update the PDF image size and alignment to fit alongside the sidebar.
@@ -359,6 +517,14 @@ export class VitalSourceContentIntegration extends TinyEmitter {
   }
 
   async getMetadata() {
+    if (this._bookIsSingleDocument()) {
+      const bookInfo = this._bookElement.getBookInfo();
+      return {
+        title: bookInfo.title,
+        link: [],
+      };
+    }
+
     // Return minimal metadata which includes only the information we really
     // want to include.
     return {
@@ -367,7 +533,34 @@ export class VitalSourceContentIntegration extends TinyEmitter {
     };
   }
 
+  navigateToSegment(ann: AnnotationData) {
+    const selector = ann.target[0].selector?.find(
+      s => s.type === 'EPUBContentSelector'
+    ) as EPUBContentSelector | undefined;
+    if (selector?.cfi) {
+      this._bookElement.goToCfi(selector.cfi);
+    } else if (selector?.url) {
+      this._bookElement.goToURL(selector.url);
+    } else {
+      throw new Error('No segment information available');
+    }
+  }
+
+  async segmentInfo(): Promise<SegmentInfo> {
+    const pageInfo = await this._bookElement.getCurrentPage();
+    return {
+      cfi: pageInfo.cfi,
+      url: pageInfo.absoluteURL,
+    };
+  }
+
   async uri() {
+    if (this._bookIsSingleDocument()) {
+      const bookInfo = this._bookElement.getBookInfo();
+      const bookId = bookInfo.isbn;
+      return `https://bookshelf.vitalsource.com/reader/books/${bookId}`;
+    }
+
     // An example of a typical URL for the chapter content in the Bookshelf reader is:
     //
     // https://jigsaw.vitalsource.com/books/9781848317703/epub/OPS/xhtml/chapter_001.html#cfi=/6/10%5B;vnd.vst.idref=chap001%5D!/4
@@ -385,10 +578,26 @@ export class VitalSourceContentIntegration extends TinyEmitter {
     return uri.toString();
   }
 
-  /**
-   * @param {Anchor} anchor
-   */
-  async scrollToAnchor(anchor) {
+  async scrollToAnchor(anchor: Anchor) {
     return this._htmlIntegration.scrollToAnchor(anchor);
+  }
+
+  /**
+   * Return true if the feature flag to treat books as one document is enabled,
+   * as opposed to treating each chapter/segment/page as a separate document.
+   */
+  _bookIsSingleDocument(): boolean {
+    return this._features.flagEnabled('book_as_single_document');
+  }
+
+  waitForFeatureFlags() {
+    // The `book_as_single_document` flag changes the URI reported by this
+    // integration.
+    //
+    // Ask the guest to delay reporting document metadata to the sidebar until
+    // feature flags have been received. This ensures that the initial document
+    // info reported to the sidebar after a chapter navigation is consistent
+    // between the previous/new guest frames.
+    return true;
   }
 }
