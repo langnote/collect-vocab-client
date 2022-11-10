@@ -17,7 +17,7 @@ class FakeWindow extends EventTarget {
 const testAnnotation = annotationFixtures.defaultAnnotation();
 
 const fixtures = {
-  ann: { $tag: 't1', ...testAnnotation },
+  ann: { $cluster: 'user-annotations', $tag: 't1', ...testAnnotation },
 
   // New annotation received from the frame
   newAnnFromFrame: {
@@ -34,9 +34,19 @@ const fixtures = {
     metadata: {
       link: [],
     },
+  },
 
-    // This should match the guest frame ID from `framesListEntry`.
-    frameIdentifier: 'abc',
+  // Argument to the `documentInfoChanged` call made by a guest displaying an EPUB
+  // document.
+  epubDocumentInfo: {
+    uri: testAnnotation.uri,
+    metadata: {
+      title: 'Test book',
+    },
+    segmentInfo: {
+      cfi: '/2',
+      url: '/chapters/02.xhtml',
+    },
   },
 };
 
@@ -191,9 +201,10 @@ describe('FrameSyncService', () => {
   /**
    * Simulate a new guest frame connecting to the sidebar.
    *
+   * @param {string} [frameId] - Guest frame ID, or `undefined` for main frame
    * @return {MessagePort} - The port that was sent to the sidebar
    */
-  async function connectGuest() {
+  async function connectGuest(frameId) {
     const { port1 } = new MessageChannel();
     hostPort.postMessage(
       {
@@ -201,6 +212,7 @@ describe('FrameSyncService', () => {
         frame2: 'sidebar',
         type: 'offer',
         requestId: 'abc',
+        sourceId: frameId,
       },
       [port1]
     );
@@ -219,6 +231,17 @@ describe('FrameSyncService', () => {
       frameSync.connect();
       const port = await connectGuest();
       assert.calledWith(guestRPC().connect, port);
+    });
+  });
+
+  describe('formatAnnot', () => {
+    it('formats annotations with only those properties needed by the annotator', () => {
+      assert.hasAllKeys(formatAnnot(fixtures.ann), [
+        '$cluster',
+        '$tag',
+        'target',
+        'uri',
+      ]);
     });
   });
 
@@ -268,18 +291,16 @@ describe('FrameSyncService', () => {
       // Connect two guests, one representing the main frame and one representing
       // an iframe.
       await connectGuest();
-      await connectGuest();
+      await connectGuest('iframe');
 
       const mainGuestRPC = fakePortRPCs[1];
       const iframeGuestRPC = fakePortRPCs[2];
 
       mainGuestRPC.emit('documentInfoChanged', {
-        frameIdentifier: null,
         uri: mainFrameAnn.uri,
       });
 
       iframeGuestRPC.emit('documentInfoChanged', {
-        frameIdentifier: 'iframe',
         uri: iframeAnn.uri,
       });
 
@@ -310,8 +331,6 @@ describe('FrameSyncService', () => {
       // what happens in VitalSource for example.
       await connectGuest();
       emitGuestEvent('documentInfoChanged', {
-        frameIdentifier: 'iframe',
-
         // Note that URI does not match annotation URI. The backend can still return
         // the annotation for this frame based on URI equivalence information.
         uri: 'https://publisher.com/books/1234/chapter1.html',
@@ -326,6 +345,57 @@ describe('FrameSyncService', () => {
         'loadAnnotations',
         sinon.match([formatAnnot(annotation)])
       );
+    });
+
+    context('in EPUB documents', () => {
+      it('sends annotations to frame if current segment matches frame', async () => {
+        const bookURI = 'https://publisher.com/books/1234';
+
+        const chapter1ann = {
+          uri: bookURI,
+          target: [
+            {
+              selector: [
+                {
+                  type: 'EPUBContentSelector',
+                  cfi: '/2',
+                  url: '/chapters/01.xhtml',
+                },
+              ],
+            },
+          ],
+        };
+        const chapter2ann = {
+          uri: bookURI,
+          target: [
+            {
+              selector: [
+                {
+                  type: 'EPUBContentSelector',
+                  cfi: '/4',
+                  url: '/chapters/02.xhtml',
+                },
+              ],
+            },
+          ],
+        };
+
+        await connectGuest();
+        emitGuestEvent('documentInfoChanged', {
+          uri: bookURI,
+          segmentInfo: {
+            cfi: '/4',
+            url: '/chapters/02.xhtml',
+          },
+        });
+        fakeStore.setState({ annotations: [chapter1ann, chapter2ann] });
+
+        assert.calledWithMatch(
+          guestRPC().call,
+          'loadAnnotations',
+          sinon.match([formatAnnot(chapter2ann)])
+        );
+      });
     });
 
     it('sends a "loadAnnotations" message only for new annotations', async () => {
@@ -573,23 +643,29 @@ describe('FrameSyncService', () => {
       frameSync.connect();
     });
 
-    it("adds the page's metadata to the frames list", async () => {
-      const frameInfo = fixtures.htmlDocumentInfo;
-      await connectGuest();
-      emitGuestEvent('documentInfoChanged', frameInfo);
+    [fixtures.htmlDocumentInfo, fixtures.epubDocumentInfo].forEach(
+      frameInfo => {
+        it('adds guest frame details to the store', async () => {
+          const frameId = 'test-frame';
 
-      assert.deepEqual(fakeStore.frames(), [
-        {
-          id: frameInfo.frameIdentifier,
-          metadata: frameInfo.metadata,
-          uri: frameInfo.uri,
+          await connectGuest(frameId);
+          emitGuestEvent('documentInfoChanged', frameInfo);
 
-          // This would be false in the real application initially, but in these
-          // tests we pretend that the fetch completed immediately.
-          isAnnotationFetchComplete: true,
-        },
-      ]);
-    });
+          assert.deepEqual(fakeStore.frames(), [
+            {
+              id: frameId,
+              metadata: frameInfo.metadata,
+              uri: frameInfo.uri,
+              segment: frameInfo.segmentInfo,
+
+              // This would be false in the real application initially, but in these
+              // tests we pretend that the fetch completed immediately.
+              isAnnotationFetchComplete: true,
+            },
+          ]);
+        });
+      }
+    );
 
     it("synchronizes highlight visibility in the guest with the sidebar's controls", async () => {
       let channel;
@@ -642,7 +718,6 @@ describe('FrameSyncService', () => {
       await connectGuest();
 
       emitGuestEvent('documentInfoChanged', {
-        frameIdentifier: 'abc',
         uri: 'http://example.org',
       });
       emitGuestEvent('close');
@@ -786,13 +861,89 @@ describe('FrameSyncService', () => {
   describe('#scrollToAnnotation', () => {
     beforeEach(async () => {
       frameSync.connect();
-      await connectGuest();
     });
 
-    it('should scroll to the annotation in the guest', () => {
-      frameSync.connect();
-      frameSync.scrollToAnnotation('atag');
-      assert.calledWith(guestRPC().call, 'scrollToAnnotation', 'atag');
+    it('does nothing if matching guest frame is not found', async () => {
+      frameSync.scrollToAnnotation(fixtures.ann);
+    });
+
+    function createEPUBAnnotation(cfi) {
+      return {
+        id: 'epub-id-1',
+        $tag: 'epub-tag-1',
+        target: [
+          {
+            selector: [
+              {
+                type: 'EPUBContentSelector',
+                cfi,
+              },
+            ],
+          },
+        ],
+      };
+    }
+
+    it('should scroll to the annotation in the correct guest', async () => {
+      await connectGuest();
+      emitGuestEvent('documentInfoChanged', fixtures.htmlDocumentInfo);
+
+      frameSync.scrollToAnnotation(fixtures.ann);
+
+      assert.calledWith(
+        guestRPC().call,
+        'scrollToAnnotation',
+        fixtures.ann.$tag
+      );
+    });
+
+    it('should trigger a navigation in an EPUB if needed', async () => {
+      await connectGuest();
+      emitGuestEvent('documentInfoChanged', fixtures.epubDocumentInfo);
+
+      // Create an annotation with a CFI that doesn't match `fixtures.epubDocumentInfo`.
+      const ann = createEPUBAnnotation('/4/8');
+      fakeStore.findIDsForTags.withArgs([ann.$tag]).returns([ann.id]);
+
+      // Request a scroll to this annotation, this will require a navigation of
+      // the guest frame.
+      frameSync.scrollToAnnotation(ann);
+
+      assert.isFalse(guestRPC().call.calledWith('scrollToAnnotation'));
+      assert.calledWith(
+        guestRPC().call,
+        'navigateToSegment',
+        sinon.match({
+          $tag: ann.$tag,
+          target: ann.target,
+        })
+      );
+
+      // After the guest navigates and the original target of the
+      // `scrollToAnnotation` call is anchored in the new guest, the sidebar
+      // should request that the new guest scroll to the annotation.
+      emitGuestEvent('syncAnchoringStatus', { $tag: ann.$tag, $orphan: false });
+      assert.calledWith(guestRPC().call, 'scrollToAnnotation', ann.$tag);
+
+      // After the `scrollToAnnotation` call has been sent, the pending-scroll
+      // state internally should be cleared and a later `syncAnchoringStatus`
+      // event should not re-scroll.
+      guestRPC().call.resetHistory();
+      emitGuestEvent('syncAnchoringStatus', { $tag: ann.$tag, $orphan: false });
+      assert.notCalled(guestRPC().call);
+    });
+
+    it('should not trigger a navigation in an EPUB if not needed', async () => {
+      await connectGuest();
+      emitGuestEvent('documentInfoChanged', fixtures.epubDocumentInfo);
+
+      const ann = createEPUBAnnotation(
+        fixtures.epubDocumentInfo.segmentInfo.cfi
+      );
+      frameSync.scrollToAnnotation(ann);
+
+      assert.isFalse(guestRPC().call.calledWith('navigateToSegment'));
+      assert.calledWith(guestRPC().call, 'scrollToAnnotation', ann.$tag);
     });
   });
 

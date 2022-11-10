@@ -1,5 +1,11 @@
-import { Card, LabeledButton, Spinner } from '@hypothesis/frontend-shared';
-import classNames from 'classnames';
+import {
+  Button,
+  CancelIcon,
+  Card,
+  CardContent,
+  Spinner,
+} from '@hypothesis/frontend-shared/lib/next';
+import classnames from 'classnames';
 import { useMemo } from 'preact/hooks';
 
 import { countVisible } from '../helpers/thread';
@@ -7,28 +13,36 @@ import { useSidebarStore } from '../store';
 
 import { useRootThread } from './hooks/use-root-thread';
 
-/**
- * @typedef FilterStatusMessageProps
- * @prop {number} [additionalCount=0] -
- *   A count of items that are visible but do not match the filters
- * @prop {string} [entitySingular="annotation"] -
- *   singular variant of the "thing" being shown (e.g. "result" when there is
- *   a query string)
- * @prop {string} [entityPlural="annotations"]
- * @prop {string|null} [filterQuery] - Currently-applied filter query string, if any
- * @prop {string|null} [focusDisplayName] -
- *   Display name for the user currently being focused
- * @prop {number} resultCount -
- *   The number of "things" that match the current filter(s). When searching by
- *   query or focusing on a user, this value includes annotations and replies.
- *   When there are selected annotations, this number includes only top-level
- *   annotations.
- */
+type FilterStatusMessageProps = {
+  /**
+   * A count of items that are visible but do not match the filters (i.e. items
+   * that have been "forced visible" by the user)
+   */
+  additionalCount?: number;
+
+  /** Singular unit of the items being shown, e.g. "result" or "annotation" */
+  entitySingular?: string;
+
+  /** Plural unit of the items being shown */
+  entityPlural?: string;
+
+  /** Currently-applied filter query string, if any */
+  filterQuery?: string | null;
+
+  /** Display name for the user currently focused, if any */
+  focusDisplayName?: string | null;
+
+  /**
+   * The number of items that match the current filter(s). When searching by
+   * query or focusing on a user, this value includes annotations and replies.
+   * When there are selected annotations, this number includes only top-level
+   * annotations.
+   */
+  resultCount: number;
+};
 
 /**
  * Render status text describing the currently-applied filters.
- *
- * @param {FilterStatusMessageProps} props
  */
 function FilterStatusMessage({
   additionalCount = 0,
@@ -37,7 +51,7 @@ function FilterStatusMessage({
   filterQuery,
   focusDisplayName,
   resultCount,
-}) {
+}: FilterStatusMessageProps) {
   return (
     <>
       {resultCount > 0 && <span>Showing </span>}
@@ -195,63 +209,67 @@ export default function FilterStatus() {
   ]);
 
   return (
-    <Card
-      classes={classNames('mb-3 p-3', {
-        // This container element needs to be present at all times but
-        // should only be visible when there are applied filters
-        'sr-only': !filterMode,
-      })}
+    <div
+      // This container element needs to be present at all times but
+      // should only be visible when there are applied filters
+      className={classnames('mb-3', { 'sr-only': !filterMode })}
+      data-testid="filter-status-container"
     >
-      <div className="flex items-center justify-center space-x-1">
-        {store.isLoading() ? (
-          <Spinner />
-        ) : (
-          <>
-            <div
-              className={classNames(
-                // Setting `min-width: 0` here allows wrapping to work as
-                // expected for long `filterQuery` strings. See
-                // https://css-tricks.com/flexbox-truncated-text/
-                'grow min-w-[0]'
-              )}
-              role="status"
-            >
+      <Card>
+        <CardContent>
+          {store.isLoading() ? (
+            <Spinner size="md" />
+          ) : (
+            <div className="flex items-center justify-center space-x-1">
+              <div
+                className={classnames(
+                  // Setting `min-width: 0` here allows wrapping to work as
+                  // expected for long `filterQuery` strings. See
+                  // https://css-tricks.com/flexbox-truncated-text/
+                  'grow min-w-[0]'
+                )}
+                role="status"
+              >
+                {filterMode && (
+                  <FilterStatusMessage
+                    additionalCount={additionalCount}
+                    entitySingular={
+                      filterMode === 'query' ? 'result' : 'annotation'
+                    }
+                    entityPlural={
+                      filterMode === 'query' ? 'results' : 'annotations'
+                    }
+                    filterQuery={filterQuery}
+                    focusDisplayName={
+                      filterMode !== 'selection' && focusState.active
+                        ? focusState.displayName
+                        : ''
+                    }
+                    resultCount={resultCount}
+                  />
+                )}
+              </div>
               {filterMode && (
-                <FilterStatusMessage
-                  additionalCount={additionalCount}
-                  entitySingular={
-                    filterMode === 'query' ? 'result' : 'annotation'
+                <Button
+                  onClick={
+                    filterMode === 'focus' && !forcedVisibleCount
+                      ? () => store.toggleFocusMode()
+                      : () => store.clearSelection()
                   }
-                  entityPlural={
-                    filterMode === 'query' ? 'results' : 'annotations'
-                  }
-                  filterQuery={filterQuery}
-                  focusDisplayName={
-                    filterMode !== 'selection' && focusState.active
-                      ? focusState.displayName
-                      : ''
-                  }
-                  resultCount={resultCount}
-                />
+                  size="sm"
+                  title={buttonText}
+                  variant="primary"
+                  data-testid="clear-button"
+                >
+                  {/** @TODO: Set `icon` prop in `Button` instead when https://github.com/hypothesis/frontend-shared/issues/675 is fixed*/}
+                  {filterMode !== 'focus' && <CancelIcon />}
+                  {buttonText}
+                </Button>
               )}
             </div>
-            {filterMode && (
-              <LabeledButton
-                icon={filterMode === 'focus' ? undefined : 'cancel'}
-                onClick={
-                  filterMode === 'focus' && !forcedVisibleCount
-                    ? () => store.toggleFocusMode()
-                    : () => store.clearSelection()
-                }
-                title={buttonText}
-                variant="primary"
-              >
-                {buttonText}
-              </LabeledButton>
-            )}
-          </>
-        )}
-      </div>
-    </Card>
+          )}
+        </CardContent>
+      </Card>
+    </div>
   );
 }
