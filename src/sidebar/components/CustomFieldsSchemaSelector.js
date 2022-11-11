@@ -177,7 +177,7 @@ export default function CustomFieldsSchemaSelector({
           <input
             className="appearance-none rounded-full h-4 w-4 border border-gray-300 bg-white checked:bg-lime-500 checked:border-lime-500 align-top bg-no-repeat bg-center bg-contain float-left mr-1"
             type="radio"
-            name="inlineRadioOptions"
+            name={`inlineRadioOptions-${annotationId}`}
             id={`inlineRadio-${annotationId}-${type.value}`}
             value={type.value}
             onChange={handleOptionChange}
