@@ -1,7 +1,8 @@
-import { Actions, Spinner } from '@hypothesis/frontend-shared';
+import { CardActions, Spinner } from '@hypothesis/frontend-shared/lib/next';
 import classnames from 'classnames';
 import { useMemo } from 'preact/hooks';
 
+import type { Annotation as IAnnotation } from '../../../types/api';
 import { useSidebarStore } from '../../store';
 import {
   annotationRole,
@@ -10,6 +11,7 @@ import {
   quote,
 } from '../../helpers/annotation-metadata';
 import { annotationDisplayName } from '../../helpers/annotation-user';
+import type { AnnotationsService } from '../../services/annotations';
 import { withServices } from '../../service-context';
 
 import AnnotationActionBar from './AnnotationActionBar';
@@ -18,21 +20,6 @@ import AnnotationEditor from './AnnotationEditor';
 import AnnotationHeader from './AnnotationHeader';
 import AnnotationQuote from './AnnotationQuote';
 import AnnotationReplyToggle from './AnnotationReplyToggle';
-
-/**
- * @typedef {import("../../../types/api").Annotation} Annotation
- */
-
-/**
- * @typedef AnnotationProps
- * @prop {Annotation} annotation
- * @prop {boolean} isReply
- * @prop {VoidFunction} [onToggleReplies] - Callback to expand/collapse reply
- *   threads. The presence of a function indicates a toggle should be rendered.
- * @prop {number} replyCount - Number of replies to this annotation's thread
- * @prop {boolean} threadIsCollapsed - Is the thread to which this annotation belongs currently collapsed?
- * @prop {import('../../services/annotations').AnnotationsService} annotationsService
- */
 
 function SavingMessage() {
   return (
@@ -45,19 +32,35 @@ function SavingMessage() {
       )}
       data-testid="saving-message"
     >
-      <Spinner
-        classes={classnames(
-          'text-xl',
-          // Slowly fade in the Spinner such that it only shows up if
-          // the saving is slow
-          'animate-fade-in-slow'
-        )}
-        size="small"
-      />
+      <span
+        // Slowly fade in the Spinner such that it only shows up if the saving
+        // is slow
+        className="text-xl animate-fade-in-slow"
+      >
+        <Spinner size="sm" />
+      </span>
       <div className="text-color-text-light font-medium">Saving...</div>
     </div>
   );
 }
+
+export type AnnotationProps = {
+  annotation: IAnnotation;
+  isReply: boolean;
+  /** Number of replies to this annotation's thread */
+  replyCount: number;
+  /** Is the thread to which this annotation belongs currently collapsed? */
+  threadIsCollapsed: boolean;
+  /**
+   * Callback to expand/collapse reply threads. The presence of a function
+   * indicates a toggle should be rendered.
+   */
+  onToggleReplies?: () => void;
+
+  // injected
+  annotationsService: AnnotationsService;
+};
+
 /**
  * A single annotation.
  *
@@ -70,7 +73,7 @@ function Annotation({
   replyCount,
   threadIsCollapsed,
   annotationsService,
-}) {
+}: AnnotationProps) {
   const store = useSidebarStore();
 
   const annotationQuote = quote(annotation);
@@ -141,9 +144,9 @@ function Annotation({
           )}
           {isSaving && <SavingMessage />}
           {showActions && (
-            <Actions classes="grow">
+            <CardActions classes="grow">
               <AnnotationActionBar annotation={annotation} onReply={onReply} />
-            </Actions>
+            </CardActions>
           )}
         </footer>
       )}
