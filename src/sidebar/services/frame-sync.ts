@@ -13,11 +13,7 @@ import { annotationMatchesSegment } from '../helpers/annotation-segment';
 import { watch } from '../util/watch';
 
 import type { Message } from '../../shared/messaging';
-import type {
-  AnnotationData,
-  DocumentMetadata,
-  SegmentInfo,
-} from '../../types/annotator';
+import type { AnnotationData, DocumentInfo } from '../../types/annotator';
 import type { Annotation } from '../../types/api';
 import type {
   SidebarToHostEvent,
@@ -28,12 +24,6 @@ import type {
 import type { SidebarStore } from '../store';
 import type { Frame } from '../store/modules/frames';
 import type { AnnotationsService } from './annotations';
-
-type DocumentInfo = {
-  uri: string;
-  metadata: DocumentMetadata;
-  segmentInfo?: SegmentInfo;
-};
 
 /**
  * Return a minimal representation of an annotation that can be sent from the
@@ -80,22 +70,28 @@ function frameForAnnotation(frames: Frame[], ann: Annotation): Frame | null {
 }
 
 /**
- * Service that synchronizes annotations between the sidebar and host page.
+ * Service that handles communication between the sidebar and guest and host
+ * frames.
  *
- * Annotations are synced in both directions. New annotations created in the host
- * page are added to the store in the sidebar and persisted to the backend. Annotations
- * fetched from the API and added to the sidebar's store are sent to the host
- * page in order to create highlights in the document. When an annotation is
- * deleted in the sidebar it is removed from the host page.
+ * The service's main responsibility is to synchronize annotations between the
+ * sidebar and guests. New annotations created in guest frames are added to the
+ * store in the sidebar and persisted to the backend.  Annotations fetched from
+ * the API and added to the sidebar's store are sent to the appropriate guest
+ * to display highlights in the document.
  *
- * This service also synchronizes the selection and focus states of annotations,
- * so that clicking a highlight in the page filters the selection in the sidebar
- * and hovering an annotation in the sidebar highlights the corresponding
- * highlights in the page.
+ * Only a minimal subset of annotation data is sent from the sidebar to guests.
+ * This is a security/privacy feature to prevent guest frames (which often
+ * contain third-party JavaScript) from observing the contents or authors of
+ * annotations.
  *
- * For annotations sent from the sidebar to host page, only the subset of annotation
- * data needed to create the highlights is sent. This is a security/privacy
- * feature to prevent the host page observing the contents or authors of annotations.
+ * In addition to annotation data, this service also handles:
+ *
+ *  - Synchronizing the selection and hover states of annotations between the
+ *    sidebar and guest frames
+ *  - Triggering scrolling or navigation of guest frames when an annotation is
+ *    clicked in the sidebar
+ *  - Sending feature flags to host and guest frames
+ *  - Various other interactions with guest and host frames
  *
  * @inject
  */
@@ -131,15 +127,19 @@ export class FrameSyncService {
   private _store: SidebarStore;
 
   /**
-   * ID of an annotation that should be scrolled to after anchoring completes.
+   * Tag of an annotation that should be scrolled to after anchoring completes.
    *
    * This is set when {@link scrollToAnnotation} is called and the document
    * needs to be navigated to a different URL. This can happen in EPUBs.
-   *
-   * We store an ID rather than a tag because the navigation currently triggers
-   * a reload of annotations, which will change their tags but not their IDs.
    */
-  private _pendingScrollToId: string | null;
+  private _pendingScrollToTag: string | null;
+
+  /**
+   * Tag of an annotation that should be hovered after anchoring completes.
+   *
+   * See notes for {@link _pendingScrollToTag}.
+   */
+  private _pendingHoverTag: string | null;
 
   // Test seam
   private _window: Window;
@@ -162,7 +162,9 @@ export class FrameSyncService {
     this._guestRPC = new Map();
     this._inFrame = new Set<string>();
     this._highlightsVisible = false;
-    this._pendingScrollToId = null;
+
+    this._pendingScrollToTag = null;
+    this._pendingHoverTag = null;
 
     this._setupSyncToGuests();
     this._setupHostEvents();
@@ -298,6 +300,7 @@ export class FrameSyncService {
         metadata: info.metadata,
         uri: info.uri,
         segment: info.segmentInfo,
+        persistent: info.persistent,
       });
     });
 
@@ -306,9 +309,16 @@ export class FrameSyncService {
 
     guestRPC.on('close', () => {
       const frame = this._store.frames().find(f => f.id === sourceId);
-      if (frame) {
+      if (frame && !frame.persistent) {
         this._store.destroyFrame(frame);
       }
+
+      // Mark annotations as no longer being loaded in the guest, even if
+      // the frame was marked as `persistent`. In that case if a new guest
+      // connects with the same ID as the one that just went away, we'll send
+      // the already-loaded annotations to the new guest.
+      this._inFrame.clear();
+
       guestRPC.destroy();
       this._guestRPC.delete(sourceId);
     });
@@ -363,10 +373,13 @@ export class FrameSyncService {
       anchoringStatusUpdates[$tag] = $orphan ? 'orphan' : 'anchored';
       scheduleAnchoringStatusUpdate();
 
-      if (this._pendingScrollToId) {
-        const [id] = this._store.findIDsForTags([$tag]);
-        if (id === this._pendingScrollToId) {
-          this._pendingScrollToId = null;
+      if ($tag === this._pendingHoverTag) {
+        this._pendingHoverTag = null;
+        guestRPC.call('hoverAnnotations', [$tag]);
+      }
+      if (this._pendingScrollToTag) {
+        if ($tag === this._pendingScrollToTag) {
+          this._pendingScrollToTag = null;
           guestRPC.call('scrollToAnnotation', $tag);
         }
       }
@@ -504,15 +517,39 @@ export class FrameSyncService {
   }
 
   /**
-   * Mark annotations as hovered.
+   * Mark annotation as hovered.
    *
    * This is used to indicate the highlights in the document that correspond
-   * to hovered annotations in the sidebar.
+   * to a hovered annotation in the sidebar.
    *
-   * @param tags - annotation $tags
+   * This function only accepts a single annotation because the user can only
+   * hover one annotation card in the sidebar at a time. Hover updates in the
+   * other direction (guest to sidebar) support multiple annotations since a
+   * user can hover multiple highlights in the document at once.
    */
-  hoverAnnotations(tags: string[]) {
+  hoverAnnotation(ann: Annotation | null) {
+    this._pendingHoverTag = null;
+
+    const tags = ann ? [ann.$tag] : [];
     this._store.hoverAnnotations(tags);
+
+    if (!ann) {
+      this._guestRPC.forEach(rpc => rpc.call('hoverAnnotations', []));
+      return;
+    }
+
+    // If annotation is not currently anchored in a guest, schedule hover for
+    // when annotation is anchored. This can happen if an annotation is for a
+    // different chapter of an EPUB than the currently loaded one. See notes in
+    // `scrollToAnnotation`.
+    const frame = frameForAnnotation(this._store.frames(), ann);
+    if (
+      !frame ||
+      (frame.segment && !annotationMatchesSegment(ann, frame.segment))
+    ) {
+      this._pendingHoverTag = ann.$tag;
+      return;
+    }
     this._guestRPC.forEach(rpc => rpc.call('hoverAnnotations', tags));
   }
 
@@ -537,10 +574,8 @@ export class FrameSyncService {
     // the annotation to anchor in the new guest frame before we can actually
     // scroll to it.
     if (frame.segment && !annotationMatchesSegment(ann, frame.segment)) {
-      if (ann.id) {
-        // Schedule scroll once anchoring completes.
-        this._pendingScrollToId = ann.id;
-      }
+      // Schedule scroll once anchoring completes.
+      this._pendingScrollToTag = ann.$tag;
       guest.call('navigateToSegment', formatAnnot(ann));
       return;
     }

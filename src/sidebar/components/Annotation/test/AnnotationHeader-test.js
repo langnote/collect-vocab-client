@@ -96,7 +96,7 @@ describe('AnnotationHeader', () => {
 
       const wrapper = createAnnotationHeader();
 
-      assert.isTrue(wrapper.find('Icon').filter({ name: 'lock' }).exists());
+      assert.isTrue(wrapper.find('LockIcon').exists());
     });
 
     it('should not render an "Only Me" icon if the annotation is being edited', () => {
@@ -104,7 +104,7 @@ describe('AnnotationHeader', () => {
 
       const wrapper = createAnnotationHeader({ isEditing: true });
 
-      assert.isFalse(wrapper.find('Icon').filter({ name: 'lock' }).exists());
+      assert.isFalse(wrapper.find('LockIcon').exists());
     });
 
     it('should not render an "Only Me" icon if the annotation is not private', () => {
@@ -284,8 +284,10 @@ describe('AnnotationHeader', () => {
       fakeIsReply.returns(false);
       const wrapper = createAnnotationHeader();
 
-      // Extended header information is rendered in a second (flex) row
-      assert.equal(wrapper.find('HeaderRow').length, 2);
+      assert.equal(
+        wrapper.find('[data-testid="extended-header-info"]').length,
+        1
+      );
     });
 
     it('should not render extended header information if annotation is reply', () => {
@@ -294,7 +296,10 @@ describe('AnnotationHeader', () => {
         showDocumentInfo: true,
       });
 
-      assert.equal(wrapper.find('HeaderRow').length, 1);
+      assert.equal(
+        wrapper.find('[data-testid="extended-header-info"]').length,
+        0
+      );
     });
 
     describe('annotation is-highlight icon', () => {
@@ -303,9 +308,8 @@ describe('AnnotationHeader', () => {
         const wrapper = createAnnotationHeader({
           isEditing: false,
         });
-        const highlightIcon = wrapper.find('Icon[name="highlight"]');
 
-        assert.isTrue(highlightIcon.exists());
+        assert.isTrue(wrapper.find('HighlightIcon').exists());
       });
 
       it('should not display the is-highlight icon if annotation is not a highlight', () => {
@@ -313,9 +317,8 @@ describe('AnnotationHeader', () => {
         const wrapper = createAnnotationHeader({
           isEditing: false,
         });
-        const highlightIcon = wrapper.find('Icon[name="highlight"]');
 
-        assert.isFalse(highlightIcon.exists());
+        assert.isFalse(wrapper.find('HighlightIcon').exists());
       });
     });
 

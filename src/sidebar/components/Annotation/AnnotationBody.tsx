@@ -1,6 +1,13 @@
-import { Icon, LabeledButton } from '@hypothesis/frontend-shared';
+import {
+  Button,
+  CollapseIcon,
+  ExpandIcon,
+} from '@hypothesis/frontend-shared/lib/next';
 import classnames from 'classnames';
 import { useMemo, useState } from 'preact/hooks';
+
+import type { Annotation } from '../../../types/api';
+import type { SidebarSettings } from '../../../types/config';
 
 import { useSidebarStore } from '../../store';
 import { isThirdPartyUser } from '../../helpers/account-id';
@@ -13,56 +20,51 @@ import MarkdownView from '../MarkdownView';
 import TagList from '../TagList';
 import TagListItem from '../TagListItem';
 
-/**
- * @typedef {import("../../../types/api").Annotation} Annotation
- * @typedef {import("../../../types/config").SidebarSettings} SidebarSettings
- */
+type ToggleExcerptButtonProps = {
+  classes?: string;
+  setCollapsed: (collapse: boolean) => void;
+  collapsed: boolean;
+};
 
 /**
  * Button to expand or collapse the annotation excerpt (content)
- *
- * @param {object} props
- *   @param {string} [props.classes]
- *   @param {(collapse:boolean) => void} props.setCollapsed
- *   @param {boolean} props.collapsed
  */
-function ToggleExcerptButton({ classes, setCollapsed, collapsed }) {
+function ToggleExcerptButton({
+  classes,
+  setCollapsed,
+  collapsed,
+}: ToggleExcerptButtonProps) {
   const toggleText = collapsed ? 'More' : 'Less';
   return (
-    <LabeledButton
+    <Button
       classes={classnames('text-grey-7 font-normal', classes)}
       expanded={!collapsed}
       onClick={() => setCollapsed(!collapsed)}
       title={`Toggle visibility of full annotation text: Show ${toggleText}`}
     >
       <div className="flex items-center gap-x-2">
-        <Icon
-          classes={classnames(
-            // TODO: Refactor shared LabeledButton styles such that rules
-            // have lower specificity and we don't need an !important rule here
-            '!text-tiny'
-          )}
-          name={collapsed ? 'expand' : 'collapse'}
-          title={collapsed ? 'expand' : 'collapse'}
-        />
+        {collapsed ? (
+          <ExpandIcon className="w-3 h-3" />
+        ) : (
+          <CollapseIcon className="w-3 h-3" />
+        )}
         <div>{toggleText}</div>
       </div>
-    </LabeledButton>
+    </Button>
   );
 }
 
-/**
- * @typedef AnnotationBodyProps
- * @prop {Annotation} annotation - The annotation in question
- * @prop {SidebarSettings} settings
- */
+export type AnnotationBodyProps = {
+  annotation: Annotation;
+
+  // injected
+  settings: SidebarSettings;
+};
 
 /**
  * Display the rendered content of an annotation.
- *
- * @param {AnnotationBodyProps} props
  */
-function AnnotationBody({ annotation, settings }) {
+function AnnotationBody({ annotation, settings }: AnnotationBodyProps) {
   // Should the text content of `Excerpt` be rendered in a collapsed state,
   // assuming it is collapsible (exceeds allotted collapsed space)?
   const [collapsed, setCollapsed] = useState(true);
@@ -88,10 +90,7 @@ function AnnotationBody({ annotation, settings }) {
     [annotation, defaultAuthority]
   );
 
-  /**
-   * @param {string} tag
-   */
-  const createTagSearchURL = tag => {
+  const createTagSearchURL = (tag: string) => {
     return store.getLink('search.tag', { tag });
   };
 

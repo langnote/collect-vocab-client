@@ -34,6 +34,7 @@ const fixtures = {
     metadata: {
       link: [],
     },
+    persistent: false,
   },
 
   // Argument to the `documentInfoChanged` call made by a guest displaying an EPUB
@@ -47,6 +48,7 @@ const fixtures = {
       cfi: '/2',
       url: '/chapters/02.xhtml',
     },
+    persistent: true,
   },
 };
 
@@ -111,8 +113,11 @@ describe('FrameSyncService', () => {
         },
 
         connectFrame(frame) {
+          const otherFrames = this.getState().frames.filter(
+            f => f.id !== frame.id
+          );
           const frames = [
-            ...this.getState().frames,
+            ...otherFrames,
             {
               ...frame,
               isAnnotationFetchComplete: true,
@@ -142,7 +147,7 @@ describe('FrameSyncService', () => {
           this.setState({ contentInfo: info });
         },
 
-        findIDsForTags: sinon.stub(),
+        findIDsForTags: sinon.stub().returns([]),
         hoverAnnotations: sinon.stub(),
         isLoggedIn: sinon.stub().returns(false),
         openSidebarPanel: sinon.stub(),
@@ -186,8 +191,9 @@ describe('FrameSyncService', () => {
     return fakePortRPCs[0];
   }
 
-  function guestRPC() {
-    return fakePortRPCs[1];
+  /** Return the `PortRPC` for the index'th guest to connect. */
+  function guestRPC(index = 0) {
+    return fakePortRPCs[1 + index];
   }
 
   function emitHostEvent(event, ...args) {
@@ -218,6 +224,29 @@ describe('FrameSyncService', () => {
     );
     await delay(0);
     return port1;
+  }
+
+  /**
+   * Create a fake annotation for an EPUB book.
+   *
+   * @param {string} cfi - Canonical Fragment Identifier indicating which chapter
+   *   the annotation relates to
+   */
+  function createEPUBAnnotation(cfi) {
+    return {
+      id: 'epub-id-1',
+      $tag: 'epub-tag-1',
+      target: [
+        {
+          selector: [
+            {
+              type: 'EPUBContentSelector',
+              cfi,
+            },
+          ],
+        },
+      ],
+    };
   }
 
   describe('#connect', () => {
@@ -657,6 +686,7 @@ describe('FrameSyncService', () => {
               metadata: frameInfo.metadata,
               uri: frameInfo.uri,
               segment: frameInfo.segmentInfo,
+              persistent: frameInfo.persistent,
 
               // This would be false in the real application initially, but in these
               // tests we pretend that the fetch completed immediately.
@@ -723,6 +753,55 @@ describe('FrameSyncService', () => {
       emitGuestEvent('close');
 
       assert.deepEqual(fakeStore.frames(), []);
+    });
+
+    // This test simulates what happens when a book chapter navigation occurs
+    // when the integration (such as VitalSource) has support for seamless
+    // transitions that do not unload annotations in the sidebar.
+    it('keeps frame in store if persistent', async () => {
+      frameSync.connect();
+
+      // Connect a guest frame which sets the `persistent` hint and a fixed ID.
+      await connectGuest('book-content');
+      emitGuestEvent('documentInfoChanged', {
+        uri: 'http://books.com/123',
+        persistent: true,
+        segment: {
+          cfi: '/2/4',
+        },
+      });
+      const frames = fakeStore.frames();
+      assert.equal(frames.length, 1);
+
+      // Load an annotation into this guest.
+      fakeStore.setState({
+        annotations: [fixtures.ann],
+      });
+
+      // Disconnect the guest, simulating a chapter navigation.
+      emitGuestEvent('close');
+
+      // Frames and annotations should be retained in the sidebar.
+      assert.equal(fakeStore.frames(), frames);
+
+      // Connect a new guest with the same ID and document URL. It should be
+      // associated with the existing frame.
+      await connectGuest('book-content');
+      emitGuestEvent('documentInfoChanged', {
+        uri: 'http://books.com/123',
+        persistent: true,
+        segment: {
+          cfi: '/2/6',
+        },
+      });
+      assert.deepEqual(fakeStore.frames(), frames);
+
+      // Check that the already-loaded annotations were sent to the new frame.
+      assert.calledWithMatch(
+        guestRPC(1).call,
+        'loadAnnotations',
+        sinon.match([formatAnnot(fixtures.ann)])
+      );
     });
   });
 
@@ -834,27 +913,65 @@ describe('FrameSyncService', () => {
     });
   });
 
-  describe('#hoverAnnotations', () => {
+  describe('#hoverAnnotation', () => {
     beforeEach(async () => {
       frameSync.connect();
       await connectGuest();
+      emitGuestEvent('documentInfoChanged', fixtures.htmlDocumentInfo);
     });
 
-    it('should update the focused annotations in the store', () => {
-      frameSync.hoverAnnotations(['a1', 'a2']);
+    it('updates the focused annotations in the store', () => {
+      frameSync.hoverAnnotation(fixtures.ann);
       assert.calledWith(
         fakeStore.hoverAnnotations,
-        sinon.match.array.deepEquals(['a1', 'a2'])
+        sinon.match.array.deepEquals([fixtures.ann.$tag])
       );
+
+      frameSync.hoverAnnotation(null);
+      assert.calledWith(fakeStore.hoverAnnotations, []);
     });
 
-    it('should focus the associated highlights in the guest', () => {
-      frameSync.hoverAnnotations([1, 2]);
+    it('focuses the associated highlights in the guest', () => {
+      frameSync.hoverAnnotation(fixtures.ann);
       assert.calledWith(
         guestRPC().call,
         'hoverAnnotations',
-        sinon.match.array.deepEquals([1, 2])
+        sinon.match.array.deepEquals([fixtures.ann.$tag])
       );
+    });
+
+    it('clears focused annotations in guest if argument is `null`', () => {
+      frameSync.hoverAnnotation(null);
+      assert.calledWith(guestRPC().call, 'hoverAnnotations', []);
+    });
+
+    it('defers focusing highlights when annotation is in a different EPUB chapter', async () => {
+      emitGuestEvent('documentInfoChanged', fixtures.epubDocumentInfo);
+
+      // Create an annotation with a CFI that doesn't match `fixtures.epubDocumentInfo`.
+      const ann = createEPUBAnnotation('/4/8');
+
+      // Request hover of annotation. The annotation is marked as hovered in
+      // the sidebar, but nothing is sent to the guest since the annotation's
+      // book chapter is not loaded.
+      frameSync.hoverAnnotation(ann);
+      assert.calledWith(
+        fakeStore.hoverAnnotations,
+        sinon.match.array.deepEquals([ann.$tag])
+      );
+      assert.isFalse(guestRPC().call.calledWith('hoverAnnotations'));
+
+      // Simulate annotation anchoring at a later point, after a chapter
+      // navigation.
+      emitGuestEvent('syncAnchoringStatus', { $tag: ann.$tag, $orphan: false });
+      assert.calledWith(guestRPC().call, 'hoverAnnotations', [ann.$tag]);
+
+      // After the `hoverAnnotations` call has been sent, the pending-hover
+      // state internally should be cleared and a later `syncAnchoringStatus`
+      // event should not re-hover.
+      guestRPC().call.resetHistory();
+      emitGuestEvent('syncAnchoringStatus', { $tag: ann.$tag, $orphan: false });
+      assert.notCalled(guestRPC().call);
     });
   });
 
@@ -866,23 +983,6 @@ describe('FrameSyncService', () => {
     it('does nothing if matching guest frame is not found', async () => {
       frameSync.scrollToAnnotation(fixtures.ann);
     });
-
-    function createEPUBAnnotation(cfi) {
-      return {
-        id: 'epub-id-1',
-        $tag: 'epub-tag-1',
-        target: [
-          {
-            selector: [
-              {
-                type: 'EPUBContentSelector',
-                cfi,
-              },
-            ],
-          },
-        ],
-      };
-    }
 
     it('should scroll to the annotation in the correct guest', async () => {
       await connectGuest();
@@ -903,7 +1003,6 @@ describe('FrameSyncService', () => {
 
       // Create an annotation with a CFI that doesn't match `fixtures.epubDocumentInfo`.
       const ann = createEPUBAnnotation('/4/8');
-      fakeStore.findIDsForTags.withArgs([ann.$tag]).returns([ann.id]);
 
       // Request a scroll to this annotation, this will require a navigation of
       // the guest frame.

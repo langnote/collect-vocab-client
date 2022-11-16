@@ -546,6 +546,12 @@ export class VitalSourceContentIntegration
     }
   }
 
+  persistFrame() {
+    // Hint to the sidebar that it should not unload annotations when the
+    // guest frame using this integration unloads.
+    return true;
+  }
+
   async segmentInfo(): Promise<SegmentInfo> {
     const pageInfo = await this._bookElement.getCurrentPage();
     return {

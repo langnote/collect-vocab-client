@@ -1,7 +1,6 @@
 import type { TinyEmitter } from 'tiny-emitter';
 
 import type { Annotation, Context, Selector, Target } from './api';
-import type { PDFViewerApplication } from './pdfjs';
 import type { ClientAnnotationData } from './shared';
 
 /**
@@ -231,20 +230,15 @@ export type IntegrationBase = {
    * sidebar before sending initial document info to the sidebar.
    */
   waitForFeatureFlags?(): boolean;
+
+  /**
+   * Whether the Guest should set the {@link DocumentInfo.persistent} flag when
+   * reporting document information to the sidebar.
+   */
+  persistFrame?(): boolean;
 };
 
 export type Integration = Destroyable & TinyEmitter & IntegrationBase;
-
-/**
- * Global variables which the Hypothesis client looks for on the `window` object
- * when loaded in a frame that influence how it behaves.
- */
-export type Globals = {
-  /** PDF.js entry point. If set, triggers loading of PDF rather than HTML integration. */
-  PDFViewerApplication?: PDFViewerApplication;
-};
-
-export type HypothesisWindow = Window & Globals;
 
 /**
  * Destroyable classes implement the `destroy` method to properly remove all
@@ -299,4 +293,35 @@ export type ContentInfoConfig = {
   /** Metadata about the container (eg. journal or book) that the current item is part of */
   container: ContentInfoItem;
   links: ContentInfoLinks;
+};
+
+/**
+ * Details about the document that is loaded in a guest frame.
+ */
+export type DocumentInfo = {
+  /**
+   * The main URI of the document. This is the primary URI that is associated with
+   * annotations created on the document.
+   */
+  uri: string;
+
+  /** Additional URIs and other metadata about the document. */
+  metadata: DocumentMetadata;
+
+  /**
+   * Information about which segment (page, chapter etc.) of a multi-segment
+   * document is loaded in a guest frame.
+   *
+   * This is used in EPUBs for example.
+   */
+  segmentInfo?: SegmentInfo;
+
+  /**
+   * A hint that the frame is likely to be replaced by another guest frame
+   * showing a different segment of the same document in future.
+   *
+   * This flag is used to facilitate more seamless transitions between
+   * book chapters.
+   */
+  persistent: boolean;
 };
